@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'humble_ledger'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=humble_ledger",
+                    "--package=humble_ledger"
+                ],
+                "filter": {
+                    "name": "humble_ledger",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'humble_ledger'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=humble_ledger",
+                    "--package=humble_ledger"
+                ],
+                "filter": {
+                    "name": "humble_ledger",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

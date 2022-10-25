@@ -1,0 +1,38 @@
+[package]
+name = "humble_ledger"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serenity = { version = "0.11", default-features = false, features = [
+    "client",
+    "gateway",
+    "rustls_backend",
+    "model",
+    "cache",
+] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+anyhow = "1.0.64"
+serenity-command-derive = { path = "../lp-bot/serenity-command-derive" }
+serenity-command = { path = "../lp-bot/serenity-command" }
+yup-oauth2 = "7.0.1"
+hyper = "0.14.20"
+hyper-native-tls = "0.3.0"
+google-sheets4 = "4.0.1"
+hyper-rustls = "0.23.0"
+hyper-tls = "0.5.0"
+chrono = "0.4.22"
+rspotify = "0.11.5"
+reqwest = "0.11.12"
+scraper = "0.13.0"
+google-youtube3 = "4.0.1"
+rusqlite = "0.28.0"
+fallible-iterator = "0.2.0"
+regex = "1.6.0"
+serde = "1.0.145"
+serde_derive = "1.0.145"
+serde_json = "1.0.85"
+itertools = "0.10.5"
+urlencoding = "2.1.2"
