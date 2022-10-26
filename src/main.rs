@@ -37,7 +37,9 @@ use spotify::Spotify;
 use youtube::Youtube;
 use yup_oauth2 as oauth;
 
-use forms::{CommandFromForm, DeleteFormCommand, FormCommand, FormsClient, ListForms};
+use forms::{
+    CommandFromForm, DeleteFormCommand, FormCommand, FormsClient, ListForms, RefreshFormCommand,
+};
 
 mod album;
 mod album_club;
@@ -189,7 +191,7 @@ impl Handler {
                     })
                     .collect();
             }
-            DeleteFormCommand::NAME => {
+            DeleteFormCommand::NAME | RefreshFormCommand::NAME => {
                 let opt = get_str_opt_ac(options, "command_name").unwrap_or_default();
                 choices = self
                     .forms
@@ -367,6 +369,7 @@ async fn main() {
 
     let mut commands = HashMap::new();
     register_command::<CommandFromForm>(&mut commands);
+    register_command::<RefreshFormCommand>(&mut commands);
     register_command::<DeleteFormCommand>(&mut commands);
     register_command::<ListForms>(&mut commands);
     let commands = RwLock::new(commands);

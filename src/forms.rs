@@ -482,6 +482,48 @@ pub async fn check_forms(handler: &Handler, ctx: &Context) -> anyhow::Result<()>
 }
 
 #[derive(Command, Debug)]
+#[cmd(name = "refresh_form_command", desc = "Refreshes a form command")]
+pub struct RefreshFormCommand {
+    #[cmd(desc = "The name of the command to refresh", autocomplete)]
+    pub command_name: String,
+}
+
+#[async_trait]
+impl BotCommand for RefreshFormCommand {
+    type Data = Handler;
+    const PERMISSIONS: Permissions = Permissions::MANAGE_EVENTS;
+
+    async fn run(
+        self,
+        handler: &Handler,
+        ctx: &Context,
+        interaction: &ApplicationCommandInteraction,
+    ) -> anyhow::Result<CommandResponse> {
+        let guild_id = interaction
+            .guild_id
+            .ok_or_else(|| anyhow!("Must be run in a guild"))?
+            .0;
+
+        let (form, submission_type): (String, Option<String>) = {
+            let db = handler.db.lock().await;
+            db.query_row(
+                "SELECT form, submission_type FROM forms WHERE guild_id = ?1 AND command_name = ?2",
+                params![guild_id, &self.command_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).context(format!("Command /{} not found", &self.command_name))?
+        };
+        let form: SimpleForm = serde_json::from_slice(form.as_bytes())?;
+        CommandFromForm {
+            command_name: self.command_name,
+            form_id: form.id,
+            submission_type,
+        }
+        .run(handler, ctx, interaction)
+        .await
+    }
+}
+
+#[derive(Command, Debug)]
 #[cmd(
     name = "delete_form_command",
     desc = "Delete a form submission command"
