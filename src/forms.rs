@@ -7,6 +7,7 @@ use hyper::{client::HttpConnector, Body, Method, Request, StatusCode};
 use hyper_tls::HttpsConnector;
 use itertools::Itertools;
 use regex::Regex;
+use rspotify::prelude::Id;
 use rusqlite::{params, Connection};
 use serde_derive::{Deserialize, Serialize};
 use serenity::{
@@ -676,16 +677,18 @@ impl SimpleForm {
                     Some(CommandDataOptionValue::String(s)) => Some(s.clone()),
                     _ => None,
                 })
-                .or(next_value.take());
-            let value = match value {
+                .or_else(|| next_value.take());
+            let mut value = match value {
                 Some(v) => v,
                 None => continue,
             };
             if sanitized.contains("spotify") || sanitized.contains("link") {
                 if submission_type == "album" {
                     if let Some(p) = handler.providers.iter().find(|p| p.url_matches(&value)) {
-                        let album_info = p.get_from_url(&value).await?.format_name();
+                        let album = p.get_from_url(&value).await?;
+                        let album_info = album.format_name();
                         next_value = Some(album_info.clone());
+                        value = album.url.clone();
                         song_infos.push(album_info)
                     }
                 } else {
@@ -699,6 +702,7 @@ impl SimpleForm {
                         &song.name,
                     );
                     next_value = Some(song_info.clone());
+                    value = song.id.unwrap().url();
                     song_infos.push(song_info);
                     song_urls.push(value.to_string());
                 }

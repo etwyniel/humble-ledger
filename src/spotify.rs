@@ -41,7 +41,8 @@ impl Spotify {
         let album = self.client.album(&AlbumId::from_id(id)?).await?;
         let name = album.name.clone();
         let artist = artists_to_string(&album.artists);
-        Ok(Album { name, artist })
+        let url = album.href;
+        Ok(Album { name, artist, url })
     }
 
     pub async fn get_song_from_id(&self, id: &str) -> anyhow::Result<FullTrack> {
@@ -145,6 +146,7 @@ impl AlbumProvider for Spotify {
                 .map(|a| Album {
                     name: a.name.clone(),
                     artist: a.artists.first().unwrap().name.clone(),
+                    url: a.href.clone().unwrap(),
                 })
                 .ok_or_else(|| anyhow!("Not found"))?)
         } else {

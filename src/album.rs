@@ -6,6 +6,7 @@ use serenity::async_trait;
 pub struct Album {
     pub name: String,
     pub artist: String,
+    pub url: String,
 }
 
 #[async_trait]

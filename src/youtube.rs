@@ -62,6 +62,7 @@ impl AlbumProvider for Youtube {
         Ok(Album {
             name: title,
             artist: String::new(),
+            url: url.to_string(),
         })
     }
 

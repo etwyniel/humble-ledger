@@ -44,6 +44,7 @@ impl AlbumProvider for Bandcamp {
         Ok(Album {
             name: title,
             artist,
+            url: url.to_string(),
         })
     }
 
