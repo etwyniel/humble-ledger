@@ -41,7 +41,7 @@ impl Spotify {
         let album = self.client.album(&AlbumId::from_id(id)?).await?;
         let name = album.name.clone();
         let artist = artists_to_string(&album.artists);
-        let url = album.href;
+        let url = album.id.url();
         Ok(Album { name, artist, url })
     }
 

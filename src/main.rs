@@ -1,54 +1,34 @@
-use std::fmt::Write;
-use std::ops::Deref;
+use std::collections::hash_map::DefaultHasher;
 use std::sync::Arc;
-use std::time::Instant;
-use std::{collections::HashMap, env};
+use std::{env, hash::Hasher};
 
-use album::AlbumProvider;
-use anyhow::{anyhow, Context as _};
-use bandcamp::Bandcamp;
-use google_sheets4::Sheets;
-use hyper::client::HttpConnector;
-use hyper_tls::HttpsConnector;
-use oauth::ServiceAccountAuthenticator;
-use playlist::{Playlist, RemovePlaylist, SubmitPlaylist};
+use rspotify::scopes;
 use rusqlite::Connection;
-use serenity::http::Http;
-use serenity::model::prelude::UnavailableGuild;
-use serenity::prelude::Mutex;
-use serenity::utils::Color;
+use serenity::async_trait;
+use serenity::model::application::command::Command;
+use serenity::model::prelude::interaction::Interaction;
+use serenity::model::prelude::{ChannelPinsUpdateEvent, Presence};
+use serenity::prelude::{Context, EventHandler};
 use serenity::{
-    async_trait,
-    client::{Context, EventHandler},
-    model::{
-        application::command::Command,
-        prelude::interaction::{
-            application_command::{
-                ApplicationCommandInteraction, CommandDataOption, CommandDataOptionValue,
-            },
-            autocomplete::AutocompleteInteraction,
-            Interaction,
-        },
-    },
-    prelude::{GatewayIntents, RwLock},
+    model::channel::Message, model::prelude::interaction::application_command::CommandDataOption,
+    prelude::GatewayIntents,
 };
-use serenity_command::{BotCommand, CommandBuilder, CommandResponse, CommandRunner};
-use spotify::Spotify;
-use youtube::Youtube;
-use yup_oauth2 as oauth;
+// use youtube::Youtube;
 
-use forms::{
-    CommandFromForm, DeleteFormCommand, FormCommand, FormsClient, ListForms, RefreshFormCommand,
-};
+use serenity_command_handler::Handler;
 
-mod album;
+use acquiring_taste::AcquiringTaste;
+use album_club::AlbumClub;
+use forms::Forms;
+use serenity_command_handler::modules::{spotify, ModPoll, Pinboard, SpotifyOAuth};
+use spotify_activity::SpotifyActivity;
+
+mod acquiring_taste;
 mod album_club;
-mod bandcamp;
-mod db;
+mod complete;
 mod forms;
-mod playlist;
-mod spotify;
-mod youtube;
+mod spotify_activity;
+// mod youtube;
 
 pub fn get_str_opt_ac<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
     options
@@ -71,332 +51,137 @@ enum CompletionType {
     Songs,
 }
 
-pub struct Handler {
-    sheets_client: Sheets<HttpsConnector<HttpConnector>>,
-    commands: RwLock<HashMap<&'static str, Box<dyn CommandRunner<Handler> + Send + Sync>>>,
-    spotify: Arc<Spotify>,
-    providers: Vec<Arc<dyn AlbumProvider>>,
-    db: Arc<Mutex<Connection>>,
-    forms_client: FormsClient,
-    forms: Arc<RwLock<Vec<FormCommand>>>,
-}
-
-impl Handler {
-    async fn process_command(
-        &self,
-        ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
-    ) -> anyhow::Result<CommandResponse> {
-        let guild_id = interaction
-            .guild_id
-            .ok_or_else(|| anyhow!("Must be run in a server"))?
-            .0;
-        let data = &interaction.data;
-        if let Some(runner) = self.commands.read().await.get(data.name.as_str()) {
-            runner.run(self, ctx, interaction).await
-        } else {
-            let forms = self.forms.read().await;
-            let form = forms
-                .iter()
-                .find(|form| form.guild_id == guild_id && form.command_name == data.name);
-            if let Some(form) = form {
-                return form
-                    .form
-                    .submit(self, ctx, interaction, &form.submission_type)
-                    .await;
-            }
-            let playlist = self
-                .get_playlist(guild_id, &data.name)
-                .await
-                .context("Unknown command")?;
-            ctx.data.write().await.insert::<Playlist>(playlist);
-            let data: SubmitPlaylist = data.into();
-            data.run(self, ctx, interaction)
-                .await
-                .context("Error submitting to playlist")
-        }
-    }
-
-    async fn autocomplete_link(&self, option: &str, ty: CompletionType) -> Vec<(String, String)> {
-        if option.len() >= 5 && !(option.starts_with("https://") && option.starts_with("http://")) {
-            match ty {
-                CompletionType::Albums => self.spotify.query_albums(option).await,
-                CompletionType::Songs => self.spotify.query_songs(option).await,
-            }
-            .unwrap_or_default()
-        } else {
-            Vec::new()
-        }
-    }
-
-    pub async fn autocomplete_album_link(
-        &self,
-        options: &[CommandDataOption],
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let mut choices = vec![];
-        let focused = get_focused_option(options);
-        let link = get_str_opt_ac(options, "link");
-        if let (Some(s), Some("link")) = (&link, focused) {
-            choices = self.autocomplete_link(s, CompletionType::Albums).await;
-        }
-        Ok(choices)
-    }
-
-    pub async fn autocomplete_song_link(
-        &self,
-        options: &[CommandDataOption],
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let mut choices = vec![];
-        let focused = get_focused_option(options);
-        let link = get_str_opt_ac(options, "link");
-        let backup_link = get_str_opt_ac(options, "backup_link");
-        if let (Some(s), Some("link")) = (link, focused) {
-            choices = self.autocomplete_link(s, CompletionType::Songs).await;
-        } else if let (Some(s), Some("backup_link")) = (backup_link, focused) {
-            choices = self.autocomplete_link(s, CompletionType::Songs).await;
-        }
-        Ok(choices)
-    }
-
-    async fn process_autocomplete(
-        &self,
-        ctx: &Context,
-        ac: AutocompleteInteraction,
-    ) -> anyhow::Result<()> {
-        let guild_id = ac
-            .guild_id
-            .ok_or_else(|| anyhow!("Must be run in a server"))?
-            .0;
-        let choices: Vec<(String, String)>;
-        let options = &ac.data.options;
-        let cmd_name = ac.data.name.as_str();
-        match cmd_name {
-            album_club::SubmitAlbum::NAME => {
-                choices = self.autocomplete_album_link(options).await?;
-            }
-            RemovePlaylist::NAME => {
-                let ac_opt = get_str_opt_ac(options, "command_name");
-                choices = self
-                    .list_playlists(guild_id)
-                    .await?
-                    .into_iter()
-                    .map(|pl| {
-                        let command_name = pl.command_name();
-                        (pl.name, command_name)
-                    })
-                    .filter(|(name, slug)| {
-                        ac_opt
-                            .map(|prompt| name.contains(prompt) || slug.contains(prompt))
-                            .unwrap_or(true)
-                    })
-                    .collect();
-            }
-            DeleteFormCommand::NAME | RefreshFormCommand::NAME => {
-                let opt = get_str_opt_ac(options, "command_name").unwrap_or_default();
-                choices = self
-                    .forms
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|form| form.guild_id == guild_id && form.command_name.contains(&opt))
-                    .map(|form| &form.command_name)
-                    .map(|cmd_name| (cmd_name.clone(), cmd_name.clone()))
-                    .collect();
-            }
-            name => {
-                let forms = self.forms.read().await;
-                let form = forms
-                    .iter()
-                    .find(|form| form.guild_id == guild_id && form.command_name == cmd_name);
-                if let Some(form) = form {
-                    let focused = match get_focused_option(options) {
-                        Some(opt) => opt,
-                        None => return Ok(()),
-                    };
-                    if focused.contains("spotify") || focused.contains("link") {
-                        let val = match get_str_opt_ac(options, focused) {
-                            Some(val) => val,
-                            None => return Ok(()),
-                        };
-                        let ty = match form.submission_type.as_str() {
-                            "album" => CompletionType::Albums,
-                            _ => CompletionType::Songs,
-                        };
-                        choices = self.autocomplete_link(val, ty).await;
-                    } else {
-                        return Ok(());
-                    }
-                } else {
-                    let _playlist = self.get_playlist(guild_id, name).await?;
-                    choices = self.autocomplete_song_link(options).await?;
-                }
-            }
-        }
-        ac.create_autocomplete_response(&ctx.http, |r| {
-            choices.into_iter().for_each(|(name, value)| {
-                r.add_string_choice(name, value);
-            });
-            r
-        })
-        .await
-        .map_err(anyhow::Error::from)
-    }
-
-    async fn register_playlist_commands(
-        &self,
-        http: &Http,
-        guilds: &[UnavailableGuild],
-    ) -> anyhow::Result<()> {
-        for g in guilds.iter().filter(|g| !g.unavailable).map(|g| g.id.0) {
-            for playlist in self.list_playlists(g).await? {
-                playlist.register(g, http).await?;
-            }
-        }
-        Ok(())
-    }
-}
-
-// Format command options for debug output
-fn format_options(opts: &[CommandDataOption]) -> String {
-    let mut out = String::new();
-    for (i, opt) in opts.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&opt.name);
-        out.push_str(": ");
-        match &opt.resolved {
-            None => out.push_str("None"),
-            Some(CommandDataOptionValue::String(s)) => write!(&mut out, "{s:?}").unwrap(),
-            Some(val) => write!(&mut out, "{val:?}").unwrap(),
-        }
-    }
-    out
-}
+struct HandlerWrapper(Handler);
 
 #[async_trait]
-impl EventHandler for Handler {
+impl EventHandler for HandlerWrapper {
     async fn ready(&self, ctx: Context, data_about_bot: serenity::model::gateway::Ready) {
-        eprintln!("{} is running!", &data_about_bot.user.name);
-        for runner in self.commands.read().await.values() {
-            Command::create_global_application_command(&ctx.http, |command| {
-                runner.register(command)
-            })
+        _ = self.0.http.set(Arc::clone(&ctx.http));
+        let commands = Command::get_global_application_commands(&ctx.http)
             .await
             .unwrap();
+        for cmd in commands {
+            if cmd.name == "build_playlist" {
+                Command::delete_global_application_command(&ctx.http, cmd.id)
+                    .await
+                    .unwrap();
+            }
         }
-        forms::check_forms(self, &ctx).await.unwrap();
-        self.register_playlist_commands(&ctx.http, &data_about_bot.guilds)
-            .await
-            .unwrap();
+        self.0.self_id.set(data_about_bot.user.id).unwrap();
+        eprintln!("{} is running!", &data_about_bot.user.name);
+        for runner in self.0.commands.read().await.0.values() {
+            if let Some(guild) = runner.guild() {
+                guild
+                    .create_application_command(&ctx.http, |command| runner.register(command))
+                    .await
+                    .unwrap();
+            } else {
+                Command::create_global_application_command(&ctx.http, |command| {
+                    runner.register(command)
+                })
+                .await
+                .unwrap();
+            }
+        }
+        forms::check_forms(&self.0, &ctx).await.unwrap();
+    }
+
+    async fn message(&self, ctx: Context, new_message: Message) {
+        if new_message.author.id.0 == 513626599330152458 {
+            let mut hasher = DefaultHasher::new();
+            hasher.write_u64(new_message.id.0);
+            let val = hasher.finish();
+            if val % 150 == 0 {
+                new_message.react(&ctx.http, '🖕').await.unwrap();
+            } else if val % 301 == 0 {
+                new_message.react(&ctx.http, '👍').await.unwrap();
+            }
+        }
+        // _ = spotify::handle_message(&ctx.http, &new_message).await;
+    }
+
+    async fn presence_update(&self, _: Context, presence: Presence) {
+        if let Ok(spt_act) = self.0.module::<SpotifyActivity>() {
+            spt_act.presence_update(&presence).await
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Autocomplete(ac) = interaction {
-            let cmd_name = ac.data.name.clone();
-            if let Err(e) = self.process_autocomplete(&ctx, ac).await {
-                eprintln!(
-                    "Error processing automplete interaction for /{}: {:?}",
-                    cmd_name, e
-                );
-            }
-        } else if let Interaction::ApplicationCommand(command) = interaction {
-            // log command
-            let guild_name = if let Some(guild_id) = command.guild_id {
-                let name = guild_id.to_partial_guild(&ctx.http).await.unwrap().name;
-                format!("[{name}] ")
-            } else {
-                String::new()
-            };
-            let user = &command.user.name;
-            let name = &command.data.name;
-            let params = format_options(&command.data.options);
-            eprintln!("{guild_name}{user}: /{name} {params}");
+        self.0.process_interaction(ctx, interaction).await;
+    }
 
-            let start = Instant::now();
-            let resp = self.process_command(&ctx, &command).await;
-            let elapsed = start.elapsed();
-            eprintln!("{guild_name}{user}: /{name} -({:?})-> {:?}", elapsed, &resp);
-            let resp = match resp {
-                Ok(resp) => resp,
-                Err(e) => CommandResponse::Private(e.to_string()),
-            };
+    async fn reaction_add(&self, ctx: Context, add_reaction: serenity::model::prelude::Reaction) {
+        if add_reaction.user_id == self.0.self_id.get().copied() {
+            return;
+        }
+        ModPoll::handle_ready_poll(&self.0, &ctx, &add_reaction)
+            .await
+            .unwrap();
+        _ = spotify::handle_reaction(&self.0, &ctx.http, &add_reaction).await;
+    }
 
-            let (contents, mut embeds, flags) = match resp.to_contents_and_flags() {
-                None => return,
-                Some(c) => c,
-            };
-            if let Some(embed) = &mut embeds {
-                embed.color(Color::DARK_GREEN);
-            }
-            if let Err(why) = command.create_interaction_response(&ctx.http, |resp|
-                resp
-                .kind(serenity::model::application::interaction::InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|message| {
-                    embeds.into_iter().for_each(|em| {message.add_embed(em);});
-                    message
-                    .content(&contents)
-                    .flags(flags)
-                })
-            ).await {
-                eprintln!("cannot respond to slash command: {:?}", why);
-                return;
-            }
+    async fn reaction_remove(
+        &self,
+        ctx: Context,
+        remove_reaction: serenity::model::prelude::Reaction,
+    ) {
+        ModPoll::handle_remove_react(&self.0, &ctx, &remove_reaction)
+            .await
+            .unwrap()
+    }
+
+    async fn channel_pins_update(&self, ctx: Context, pin: ChannelPinsUpdateEvent) {
+        let guild_id = match pin.guild_id {
+            Some(gid) => gid,
+            None => return,
+        };
+        if let Err(e) =
+            Pinboard::move_pin_to_pinboard(&self.0, &ctx, pin.channel_id, guild_id).await
+        {
+            let guild_name = guild_id
+                .name(&ctx.cache)
+                .map(|name| format!("[{name}] "))
+                .unwrap_or_default();
+            eprintln!("{guild_name}Error moving message to pinboard: {e:?}");
         }
     }
 }
 
-fn register_command<C: for<'a> CommandBuilder<'a>>(
-    commands: &mut HashMap<&'static str, Box<dyn CommandRunner<Handler> + Send + Sync>>,
-) where
-    C: BotCommand<Data = Handler>,
-{
-    commands.insert(C::NAME, C::runner());
+async fn build_handler() -> anyhow::Result<Handler> {
+    let conn = Connection::open("humble_ledger.sqlite")?;
+    let polls = ModPoll::new("✅", "❎", "▶️", None, "<a:crabrave:996854529742094417>");
+    let spotify_oauth = SpotifyOAuth::new_auth_code(scopes!(
+        "playlist-modify-public",
+        "playlist-read-private",
+        "playlist-read-collaborative",
+        "user-library-read",
+        "user-read-private",
+        "playlist-modify-private"
+    ))
+    .await?;
+
+    Ok(Handler::builder(conn)
+        .module::<Forms>()
+        .await?
+        .module::<AlbumClub>()
+        .await?
+        .with_module(polls)
+        .await?
+        .with_module(spotify_oauth)
+        .await?
+        .module::<AcquiringTaste>()
+        .await?
+        .module::<SpotifyActivity>()
+        .await?
+        .module::<Pinboard>()
+        .await?
+        .default_command_handler(Forms::process_form_command)
+        .build())
 }
 
 #[tokio::main]
 async fn main() {
-    // Initialize google credentials
-    let conn = hyper_tls::HttpsConnector::new();
-    let client = hyper::Client::builder().build(conn);
-    let client_secret = oauth::read_service_account_key(&"credentials.json".to_string())
-        .await
-        .unwrap();
-    let authenticator = ServiceAccountAuthenticator::with_client(client_secret, client.clone())
-        .build()
-        .await
-        .unwrap();
-
-    let mut commands = HashMap::new();
-    register_command::<CommandFromForm>(&mut commands);
-    register_command::<RefreshFormCommand>(&mut commands);
-    register_command::<DeleteFormCommand>(&mut commands);
-    register_command::<ListForms>(&mut commands);
-    let commands = RwLock::new(commands);
-    let spotify = Arc::new(Spotify::new().await.unwrap());
-    let providers: Vec<Arc<(dyn AlbumProvider + 'static)>> = vec![
-        Arc::clone(&spotify) as _,
-        Arc::new(Bandcamp::new()),
-        Arc::new(Youtube::new(&client, &authenticator)),
-    ];
-    let sheets_client = google_sheets4::api::Sheets::new(client.clone(), authenticator.clone());
-    let db = Arc::new(Mutex::new(db::init().unwrap()));
-    let forms_client = FormsClient {
-        authenticator,
-        client,
-    };
-    let forms = Arc::new(RwLock::new(
-        forms::load_forms(db.lock().await.deref()).unwrap(),
-    ));
-    let handler = Handler {
-        sheets_client,
-        commands,
-        spotify,
-        providers,
-        db,
-        forms_client,
-        forms,
-    };
+    let handler = build_handler().await.unwrap();
 
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
@@ -406,11 +191,18 @@ async fn main() {
         .expect("application id is not a valid id");
 
     // Build our client.
-    let mut client = serenity::Client::builder(token, GatewayIntents::GUILD_MESSAGES)
-        .event_handler(handler)
-        .application_id(application_id)
-        .await
-        .expect("Error creating client");
+    let mut client = serenity::Client::builder(
+        token,
+        GatewayIntents::GUILD_MESSAGES
+            | GatewayIntents::GUILD_MESSAGE_REACTIONS
+            | GatewayIntents::GUILD_PRESENCES
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILDS,
+    )
+    .event_handler(HandlerWrapper(handler))
+    .application_id(application_id)
+    .await
+    .expect("Error creating client");
 
     // Start a single shard, and start listening to events.
     //

@@ -1,8 +1,8 @@
-use std::{cmp::Ordering, time::Duration};
+use std::{cmp::Ordering, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail, Context as _};
-use chrono::Local;
 use fallible_iterator::FallibleIterator;
+use google_sheets4::Sheets;
 use hyper::{client::HttpConnector, Body, Method, Request, StatusCode};
 use hyper_tls::HttpsConnector;
 use itertools::Itertools;
@@ -13,23 +13,35 @@ use serde_derive::{Deserialize, Serialize};
 use serenity::{
     async_trait,
     builder::{CreateApplicationCommand, CreateEmbed},
+    futures::future::BoxFuture,
     model::{
         prelude::{
             command::CommandOptionType,
-            interaction::application_command::{
-                ApplicationCommandInteraction, CommandDataOptionValue,
+            interaction::{
+                application_command::{ApplicationCommandInteraction, CommandDataOptionValue},
+                autocomplete::AutocompleteInteraction,
             },
             GuildId,
         },
+        user::User,
         Permissions,
     },
-    prelude::Context,
+    prelude::{Context, RwLock},
+    FutureExt,
 };
-use serenity_command::{BotCommand, CommandResponse};
-use serenity_command_derive::Command;
-use yup_oauth2::authenticator::Authenticator;
+use yup_oauth2::{authenticator::Authenticator, ServiceAccountAuthenticator};
 
-use crate::{spotify, Handler};
+use serenity_command::{BotCommand, CommandKey, CommandResponse};
+use serenity_command_derive::Command;
+use serenity_command_handler::{
+    db::Db,
+    modules::{AlbumLookup, Spotify},
+    prelude::*,
+};
+
+use crate::complete::process_autocomplete;
+
+// use crate::{spotify, Handler};
 
 #[derive(Deserialize, Debug)]
 pub struct Form {
@@ -167,7 +179,7 @@ pub struct SimpleForm {
     pub title: String,
     pub questions: Vec<SimpleQuestion>,
     pub responder_uri: String,
-    pub sheet_id: String,
+    pub sheet_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -237,8 +249,8 @@ impl Form {
         let sheet_id = self
             .linked_sheet_id
             .as_ref()
-            .ok_or_else(|| anyhow!("No linked spreadsheet"))?
-            .clone();
+            // .ok_or_else(|| anyhow!("No linked spreadsheet"))?
+            .cloned();
         Ok(SimpleForm {
             id,
             title,
@@ -248,6 +260,8 @@ impl Form {
         })
     }
 }
+
+// converts s to a string that can be used as a command or option name
 pub fn sanitize_name(s: &str) -> String {
     let temp = s.chars().filter(|c| c.is_ascii()).collect::<String>();
     let it = temp
@@ -285,7 +299,9 @@ impl SimpleForm {
         let mut cmd = CreateApplicationCommand::default();
         cmd.name(sanitize_name(command_name))
             .description(&self.title);
+        // skip first question, assumed to be username
         let mut questions = self.questions.iter().skip(1).collect::<Vec<_>>();
+        // discord requires required options to be first
         questions.sort_by(|l, r| match (l.required, r.required) {
             (true, true) | (false, false) => Ordering::Equal,
             (false, true) => Ordering::Greater,
@@ -410,7 +426,8 @@ impl CommandFromForm {
         if let Some(cap) = spreadsheet_url_re.captures(&self.form_id) {
             self.form_id = cap.get(1).unwrap().as_str().to_string();
         }
-        let form = handler.forms_client.get_form(&self.form_id).await?;
+        let forms: &Forms = handler.module()?;
+        let form = forms.forms_client.get_form(&self.form_id).await?;
         let cmd = form.to_command(&self.command_name);
         let cmd = guild_id
             .create_application_command(&ctx.http, |c| {
@@ -427,7 +444,7 @@ impl CommandFromForm {
             .to_string();
 
         let db = handler.db.lock().await;
-        db.execute(
+        db.conn.execute(
             "INSERT INTO forms (guild_id, command_name, command_id, form, submission_type)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT (guild_id, command_name) DO UPDATE
@@ -435,6 +452,7 @@ impl CommandFromForm {
                  WHERE guild_id = ?1 AND command_name = ?2",
             params![guild_id.0, &cmd.name, cmd.id.0, form_json, &submission_type],
         )?;
+        drop(db);
 
         let command = FormCommand {
             guild_id: guild_id.0,
@@ -443,7 +461,7 @@ impl CommandFromForm {
             form,
             submission_type,
         };
-        let mut forms = handler.forms.write().await;
+        let mut forms = forms.forms.write().await;
         if let Some(form) = forms
             .iter_mut()
             .find(|form| form.command_name == self.command_name)
@@ -459,7 +477,7 @@ impl CommandFromForm {
 pub async fn check_forms(handler: &Handler, ctx: &Context) -> anyhow::Result<()> {
     let mut to_re_add = Vec::new();
     {
-        for form in handler.forms.read().await.iter() {
+        for form in handler.module::<Forms>()?.forms.read().await.iter() {
             if form.form.questions[0].id.is_empty() {
                 to_re_add.push((
                     form.guild_id,
@@ -507,11 +525,12 @@ impl BotCommand for RefreshFormCommand {
 
         let (form, submission_type): (String, Option<String>) = {
             let db = handler.db.lock().await;
-            db.query_row(
+            db.conn.query_row(
                 "SELECT form, submission_type FROM forms WHERE guild_id = ?1 AND command_name = ?2",
                 params![guild_id, &self.command_name],
                 |row| Ok((row.get(0)?, row.get(1)?)),
-            ).context(format!("Command /{} not found", &self.command_name))?
+            )
+            .context(format!("Command /{} not found", &self.command_name))?
         };
         let form: SimpleForm = serde_json::from_slice(form.as_bytes())?;
         CommandFromForm {
@@ -559,12 +578,12 @@ impl BotCommand for DeleteFormCommand {
                 .await?;
         }
         let db = handler.db.lock().await;
-        db.execute(
+        db.conn.execute(
             "DELETE FROM forms WHERE guild_id = ?1 AND command_name = ?2",
             params![guild_id.0, &self.command_name],
         )?;
         {
-            let mut forms = handler.forms.write().await;
+            let mut forms = handler.module::<Forms>()?.forms.write().await;
             forms.retain(|form| form.command_name != self.command_name);
         }
         Ok(CommandResponse::Public(format!(
@@ -592,7 +611,7 @@ impl BotCommand for ListForms {
             .guild_id
             .ok_or_else(|| anyhow!("Must be run in a guild"))?
             .0;
-        let forms = handler.forms.read().await;
+        let forms = handler.module::<Forms>()?.forms.read().await;
         let contents = forms
             .iter()
             .filter(|form| form.guild_id == guild_id)
@@ -649,24 +668,32 @@ impl SimpleForm {
         submission_type: &str,
     ) -> anyhow::Result<CommandResponse> {
         let user = &interaction.user;
-        let user_handle = format!("{}#{:04}", &user.name, user.discriminator);
-        let mut values = vec!["".to_string(); self.questions.len() + 1];
-        let now = Local::now();
-        let timestamp = format!("{}", now.format("%m/%d/%Y %H:%M:%S"));
-        // let song = handler.spotify.get_song_from_url(&self.link).await?;
-        values[0].push_str(&timestamp);
-        values[1].push_str(&user_handle);
+        let user_handle = if user.discriminator == 0 {
+            // new username format
+            format!("@{}", &user.name)
+        } else {
+            format!("{}#{:04}", &user.name, user.discriminator)
+        };
 
+        let forms: &Forms = handler.module()?;
+        let spotify: &Spotify = handler.module()?;
+        let lookup: &AlbumLookup = handler.module()?;
         let mut song_infos = Vec::new();
         let mut song_urls = Vec::new();
         let mut value_pairs = Vec::with_capacity(self.questions.len());
         let mut next_value = None;
         for q in self.questions.iter().rev() {
+            // parse hexadecimal question ID
             let question_id = u64::from_str_radix(&q.id, 16).context("Invalid form definition")?;
-            if q.title.to_lowercase().contains("user") {
+
+            // determine whether question is asking for a username
+            let lowercase_title = q.title.to_lowercase();
+            if lowercase_title.contains("user") || lowercase_title.contains("discord") {
                 value_pairs.push((question_id, user_handle.clone()));
                 continue;
             }
+
+            // match question with command option and get its value
             let sanitized = sanitize_name(&q.title);
             let value = interaction
                 .data
@@ -680,25 +707,33 @@ impl SimpleForm {
                 .or_else(|| next_value.take());
             let mut value = match value {
                 Some(v) => v,
+                None if q.required => {
+                    bail!(
+                        "Cannot submit form response: no value provided for {}",
+                        q.title
+                    )
+                }
                 None => continue,
             };
+
+            // determine whether question is asking for a link to a song/album
             if sanitized.contains("spotify") || sanitized.contains("link") {
                 if submission_type == "album" {
-                    if let Some(p) = handler.providers.iter().find(|p| p.url_matches(&value)) {
+                    if let Some(p) = lookup.providers().iter().find(|p| p.url_matches(&value)) {
                         let album = p.get_from_url(&value).await?;
                         let album_info = album.format_name();
                         next_value = Some(album_info.clone());
-                        value = album.url.clone();
+                        value = album.url.clone().unwrap_or_default();
                         song_infos.push(album_info)
                     }
                 } else {
-                    let song = handler.spotify.get_song_from_url(&value).await?;
-                    if song.duration > Duration::from_secs(60 * 20) {
+                    let song = spotify.get_song_from_url(&value).await?;
+                    if song.duration > Duration::from_secs(60 * 45) {
                         bail!("This song is too long!")
                     }
                     let song_info = format!(
                         "{} - {}",
-                        spotify::artists_to_string(&song.artists),
+                        Spotify::artists_to_string(&song.artists),
                         &song.name,
                     );
                     next_value = Some(song_info.clone());
@@ -709,6 +744,8 @@ impl SimpleForm {
             }
             value_pairs.push((question_id, value));
         }
+
+        // build request payload
         let form_data = value_pairs
             .into_iter()
             .map(|(id, value)| format!("entry.{id}={}", urlencoding::encode(&value)))
@@ -720,7 +757,7 @@ impl SimpleForm {
             .method(Method::POST)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(Body::from(form_data.into_bytes()))?;
-        let resp = handler.forms_client.client.request(req).await?;
+        let resp = forms.forms_client.client.request(req).await?;
         if resp.status() != StatusCode::OK {
             bail!("Failed to send response: status {}", resp.status());
         }
@@ -728,13 +765,195 @@ impl SimpleForm {
         let contents = if !song_infos.is_empty() {
             format!(
                 "Submitted {} to {}\n{}",
-                song_infos.join(", "),
+                song_infos.iter().rev().join(", "), // questions were processed in reverse order
                 &self.title,
-                song_urls.join("\n")
+                song_urls.iter().rev().join("\n")
             )
         } else {
             format!("Submitted to {}", &self.title)
         };
         Ok(CommandResponse::Private(contents))
+    }
+
+    pub async fn get_submissions_for_user(
+        &self,
+        handler: &Handler,
+        user: &User,
+    ) -> anyhow::Result<CommandResponse> {
+        let Some(sheet_id) = &self.sheet_id else {
+            bail!("No linked spreadsheet, cannot check submissions");
+        };
+        let rows = handler
+            .module::<Forms>()?
+            .sheets_client
+            .spreadsheets()
+            .values_get(sheet_id, "A:Z")
+            .doit()
+            .await?
+            .1;
+        let Some(values) = rows.values else {
+            bail!("No submissions found on this sheet");
+        };
+        let username = user.name.to_lowercase();
+        let mut resp = values
+            .into_iter()
+            .filter(|row| {
+                row.get(1)
+                    .map(|submitter| {
+                        submitter
+                            .trim_start_matches('@')
+                            .to_lowercase()
+                            .starts_with(&username)
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|row| {
+                row.iter()
+                    .skip(2) // skip timestamp and username
+                    .filter(|value| !(value.is_empty() || value.starts_with("https://")))
+                    .join(" - ")
+            })
+            .join("\n");
+        if resp.is_empty() {
+            resp = format!(
+                "No submissions from user {} to form {}",
+                &user.name, &self.title
+            );
+        }
+        Ok(CommandResponse::Private(resp))
+    }
+}
+
+#[derive(Command)]
+#[cmd(name = "get_submissions", desc = "Get your submissions to a form")]
+pub struct GetSubmissions {
+    #[cmd(desc = "the command used to submit", autocomplete)]
+    pub command_name: String,
+}
+
+#[async_trait]
+impl BotCommand for GetSubmissions {
+    type Data = Handler;
+
+    async fn run(
+        self,
+        handler: &Handler,
+        _ctx: &Context,
+        interaction: &ApplicationCommandInteraction,
+    ) -> anyhow::Result<CommandResponse> {
+        let forms: &Forms = handler.module()?;
+        let forms = forms.forms.read().await;
+        let cmd_name = &self.command_name;
+        let Some(form) = forms.iter().find(|form| &form.command_name == cmd_name) else {
+            bail!("Command {} not found", cmd_name);
+        };
+        form.form
+            .get_submissions_for_user(handler, &interaction.user)
+            .await
+    }
+}
+
+pub struct Forms {
+    pub sheets_client: Sheets<HttpsConnector<HttpConnector>>,
+    pub forms_client: FormsClient,
+    pub forms: Arc<RwLock<Vec<FormCommand>>>,
+}
+
+impl Forms {
+    fn complete_forms<'a>(
+        handler: &'a Handler,
+        ctx: &'a Context,
+        _key: CommandKey<'a>,
+        ac: &'a AutocompleteInteraction,
+    ) -> BoxFuture<'a, anyhow::Result<bool>> {
+        async move { process_autocomplete(handler, ctx, ac).await }.boxed()
+    }
+
+    pub fn process_form_command<'a>(
+        handler: &'a Handler,
+        ctx: &'a Context,
+        cmd: &'a ApplicationCommandInteraction,
+    ) -> BoxFuture<'a, anyhow::Result<CommandResponse>> {
+        async move {
+            let guild_id = cmd
+                .guild_id
+                .ok_or_else(|| anyhow!("Must be run in a server"))?
+                .0;
+            let data = &cmd.data;
+            let forms = handler.module::<Forms>()?.forms.read().await;
+            let form = forms
+                .iter()
+                .find(|form| form.guild_id == guild_id && form.command_name == data.name);
+            if let Some(form) = form {
+                return form
+                    .form
+                    .submit(handler, ctx, cmd, &form.submission_type)
+                    .await;
+            }
+            bail!("Command not found")
+        }
+        .boxed()
+    }
+}
+
+#[async_trait]
+impl Module for Forms {
+    async fn add_dependencies(builder: HandlerBuilder) -> anyhow::Result<HandlerBuilder> {
+        builder
+            .module::<Spotify>()
+            .await?
+            .module::<AlbumLookup>()
+            .await
+    }
+
+    async fn setup(&mut self, db: &mut Db) -> anyhow::Result<()> {
+        db.conn.execute(
+            "CREATE TABLE IF NOT EXISTS forms (
+                guild_id INTEGER NOT NULL,
+                command_name STRING NOT NULL,
+                command_id INTEGER NOT NULL,
+                form STRING NOT NULL,
+                submission_type STRING NOT NULL DEFAULT('song'),
+
+                UNIQUE(guild_id, command_name)
+            )",
+            [],
+        )?;
+        let forms = load_forms(&db.conn).unwrap();
+        *self.forms.write().await = forms;
+        Ok(())
+    }
+
+    async fn init(_: &ModuleMap) -> anyhow::Result<Self> {
+        let conn = hyper_tls::HttpsConnector::new();
+        let client = hyper::Client::builder().build(conn);
+        let client_secret = yup_oauth2::read_service_account_key(&"credentials.json".to_string())
+            .await
+            .unwrap();
+        let authenticator = ServiceAccountAuthenticator::with_client(client_secret, client.clone())
+            .build()
+            .await
+            .unwrap();
+        let sheets_client = google_sheets4::api::Sheets::new(client.clone(), authenticator.clone());
+        let forms_client = FormsClient {
+            authenticator,
+            client,
+        };
+        let forms = Default::default();
+        Ok(Forms {
+            sheets_client,
+            forms_client,
+            forms,
+        })
+    }
+
+    fn register_commands(&self, store: &mut CommandStore, completions: &mut CompletionStore) {
+        store.register::<CommandFromForm>();
+        store.register::<ListForms>();
+        store.register::<DeleteFormCommand>();
+        store.register::<RefreshFormCommand>();
+        store.register::<GetSubmissions>();
+
+        completions.push(Forms::complete_forms);
     }
 }
