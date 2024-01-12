@@ -16,9 +16,17 @@ First you need to grab API credentials:
 
 ### Create a discord API token
 * Create an application: https://discord.com/developers/applications
-  * New Application, fill in name
+  * New Application, fill in name (your choice)
   * Under OAuth2 -> URL generator
-  * Enable `bot`, select permissions (TODO: document permission set)
+  * Enable `bot`, select permissions
+    * This seems(?) to be the required set:
+    * Privileged Gateway Intents:
+      * Presence Intent
+      * Message Content Intent
+    * Read Messages/view Channels
+    * Send Messages
+    * Add Reactions
+  * Permission Integer: 3136
   * Save URL (needed to add bot to server)
 * Save the application id
 * Under bot tab, create a token and save it
@@ -27,16 +35,26 @@ First you need to grab API credentials:
 
 * https://developer.spotify.com/dashboard
 * Create an app
-* Get client ID and secret
+* Set redirect uri to something that doesn't exist ("http://localhost:9999/")
+  * Save the redirect uri verbatim (copy/paste)
+* Got to settings, save the client ID
 
+### Last.fm API account
+
+* Create a last.fm API account: https://www.last.fm/api/account/create
+* Save the API_KEY
 
 Required environment variables:
 * `DISCORD_TOKEN` - From `Create a discord API token`
 * `APPLICATION_ID`- From `Create a discord API token`
 * `RSPOTIFY_CLIENT_ID` - From `Spotify API credentials`
 * `RSPOTIFY_CLIENT_SECRET` - From `Spotify API credentials`
+* `RSPOTIFY_REDIRECT_URI` -  From `Spotify API credentials`
+* `LFM_API_KEY` - From `Last.fm API account`
 
-# Requirements
+# Build
+
+## Requirements
 
 * rust and cargo
 * clang
@@ -46,10 +64,10 @@ Required environment variables:
 
 * make (optional)
 
-# Building
+# How to build
 
-* Make sure submodules are updated: `git submodule update --init`
 * Run `make`
+* Alternatively: `cargo build`
 
 # Running the bot
 
@@ -61,7 +79,8 @@ DISCORD_PUBLIC_KEY=<...>
 DISCORD_TOKEN=<...>
 RSPOTIFY_CLIENT_ID=<...>
 RSPOTIFY_CLIENT_SECRET=<...>
-
+RSPOTIFY_REDIRECT_URI=<...>
+LFM_API_KEY=<...>
 ```
 
 * Run `make run` or `./run.sh`
