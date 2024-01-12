@@ -18,13 +18,11 @@ use serenity::{
 use serenity_command_handler::Handler;
 
 use acquiring_taste::AcquiringTaste;
-use album_club::AlbumClub;
 use forms::Forms;
 use serenity_command_handler::modules::{spotify, ModPoll, Pinboard, SpotifyOAuth};
 use spotify_activity::SpotifyActivity;
 
 mod acquiring_taste;
-mod album_club;
 mod complete;
 mod forms;
 mod spotify_activity;
@@ -162,8 +160,6 @@ async fn build_handler() -> anyhow::Result<Handler> {
 
     Ok(Handler::builder(conn)
         .module::<Forms>()
-        .await?
-        .module::<AlbumClub>()
         .await?
         .with_module(polls)
         .await?
