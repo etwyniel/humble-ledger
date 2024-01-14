@@ -84,3 +84,19 @@ LFM_API_KEY=<...>
 ```
 
 * Run `make run` or `./run.sh`
+
+# Inviting the bot to your server:
+
+* Either go to your discord app page
+  * -> OAuth2
+  * -> URL Generator
+  * Select the required scopes
+  * Copy the generated URI and paste into your browser address bar
+
+* Alternatively, construct the URL (replace `${APPLICATION ID}` with your saved discord application id):
+
+```
+https://discord.com/api/oauth2/authorize?client_id=${APPLICATION_ID}&permissions=3136&scope=bot
+```
+
+* Copy into your browser and follow instructions
