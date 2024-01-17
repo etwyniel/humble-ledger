@@ -12,17 +12,11 @@ use rusqlite::{params, Connection};
 use serde_derive::{Deserialize, Serialize};
 use serenity::{
     async_trait,
-    builder::{CreateApplicationCommand, CreateEmbed},
+    builder::{CreateCommand, CreateCommandOption, CreateEmbed},
     futures::future::BoxFuture,
     model::{
-        prelude::{
-            command::CommandOptionType,
-            interaction::{
-                application_command::{ApplicationCommandInteraction, CommandDataOptionValue},
-                autocomplete::AutocompleteInteraction,
-            },
-            GuildId,
-        },
+        application::{CommandDataOptionValue, CommandInteraction, CommandOptionType},
+        prelude::GuildId,
         user::User,
         Permissions,
     },
@@ -295,10 +289,8 @@ pub fn sanitize_name(s: &str) -> String {
 }
 
 impl SimpleForm {
-    pub fn to_command(&self, command_name: &str) -> CreateApplicationCommand {
-        let mut cmd = CreateApplicationCommand::default();
-        cmd.name(sanitize_name(command_name))
-            .description(&self.title);
+    pub fn to_command(&self, command_name: &str) -> CreateCommand {
+        let mut cmd = CreateCommand::new(sanitize_name(command_name)).description(&self.title);
         // skip first question, assumed to be username
         let mut questions = self.questions.iter().skip(1).collect::<Vec<_>>();
         // discord requires required options to be first
@@ -321,19 +313,15 @@ impl SimpleForm {
                     continue;
                 }
             }
-            cmd.create_option(|opt| {
-                opt.kind(CommandOptionType::String)
-                    .name(&sanitized)
-                    .description(&q.title)
-                    .required(q.required)
-                    .set_autocomplete(autocomplete);
-                if let QuestionType::Choice(values) = &q.ty {
-                    for v in values {
-                        opt.add_string_choice(v, v);
-                    }
-                }
-                opt
-            });
+            let mut opt = CreateCommandOption::new(CommandOptionType::String, &sanitized, &q.title)
+                .required(q.required)
+                .set_autocomplete(autocomplete);
+            if let QuestionType::Choice(values) = &q.ty {
+                opt = values
+                    .into_iter()
+                    .fold(opt, |opt, v| opt.add_string_choice(v, v));
+            }
+            cmd = cmd.add_option(opt);
             autocomplete = false;
         }
         cmd
@@ -396,7 +384,7 @@ impl BotCommand for CommandFromForm {
         self,
         handler: &Handler,
         ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let guild_id = interaction
             .guild_id
@@ -404,13 +392,12 @@ impl BotCommand for CommandFromForm {
         self.add_form(handler, ctx, guild_id).await
     }
 
-    fn setup_options(
-        opt_name: &'static str,
-        opt: &mut serenity::builder::CreateApplicationCommandOption,
-    ) {
+    fn setup_options(opt_name: &'static str, opt: CreateCommandOption) -> CreateCommandOption {
         if opt_name == "submission_type" {
-            opt.add_string_choice("song", "song");
-            opt.add_string_choice("album", "album");
+            opt.add_string_choice("song", "song")
+                .add_string_choice("album", "album")
+        } else {
+            opt
         }
     }
 }
@@ -429,13 +416,8 @@ impl CommandFromForm {
         let forms: &Forms = handler.module()?;
         let form = forms.forms_client.get_form(&self.form_id).await?;
         let cmd = form.to_command(&self.command_name);
-        let cmd = guild_id
-            .create_application_command(&ctx.http, |c| {
-                *c = cmd;
-                c
-            })
-            .await?;
-        let resp = format!("Created command </{}:{}>", &cmd.name, cmd.id.0);
+        let cmd = guild_id.create_command(&ctx.http, cmd).await?;
+        let resp = format!("Created command </{}:{}>", &cmd.name, cmd.id.get());
         let form_json = serde_json::to_string(&form)?;
         let submission_type = self
             .submission_type
@@ -450,14 +432,20 @@ impl CommandFromForm {
                  ON CONFLICT (guild_id, command_name) DO UPDATE
                  SET command_id = ?3, form = ?4, submission_type = ?5
                  WHERE guild_id = ?1 AND command_name = ?2",
-            params![guild_id.0, &cmd.name, cmd.id.0, form_json, &submission_type],
+            params![
+                guild_id.get(),
+                &cmd.name,
+                cmd.id.get(),
+                form_json,
+                &submission_type
+            ],
         )?;
         drop(db);
 
         let command = FormCommand {
-            guild_id: guild_id.0,
+            guild_id: guild_id.get(),
             command_name: cmd.name.clone(),
-            command_id: cmd.id.0,
+            command_id: cmd.id.get(),
             form,
             submission_type,
         };
@@ -494,7 +482,7 @@ pub async fn check_forms(handler: &Handler, ctx: &Context) -> anyhow::Result<()>
             command_name,
             submission_type: Some(submission_type),
         }
-        .add_form(handler, ctx, GuildId(guild_id))
+        .add_form(handler, ctx, GuildId::new(guild_id))
         .await?;
     }
     Ok(())
@@ -516,12 +504,12 @@ impl BotCommand for RefreshFormCommand {
         self,
         handler: &Handler,
         ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let guild_id = interaction
             .guild_id
             .ok_or_else(|| anyhow!("Must be run in a guild"))?
-            .0;
+            .get();
 
         let (form, submission_type): (String, Option<String>) = {
             let db = handler.db.lock().await;
@@ -562,25 +550,23 @@ impl BotCommand for DeleteFormCommand {
         self,
         handler: &Handler,
         ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let guild_id = interaction
             .guild_id
             .ok_or_else(|| anyhow!("Must be run in a guild"))?;
         if let Some(cmd) = guild_id
-            .get_application_commands(&ctx.http)
+            .get_commands(&ctx.http)
             .await?
             .iter()
             .find(|cmd| cmd.name == self.command_name)
         {
-            guild_id
-                .delete_application_command(&ctx.http, cmd.id)
-                .await?;
+            guild_id.delete_command(&ctx.http, cmd.id).await?;
         }
         let db = handler.db.lock().await;
         db.conn.execute(
             "DELETE FROM forms WHERE guild_id = ?1 AND command_name = ?2",
-            params![guild_id.0, &self.command_name],
+            params![guild_id.get(), &self.command_name],
         )?;
         {
             let mut forms = handler.module::<Forms>()?.forms.write().await;
@@ -605,12 +591,12 @@ impl BotCommand for ListForms {
         self,
         handler: &Handler,
         _ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let guild_id = interaction
             .guild_id
             .ok_or_else(|| anyhow!("Must be run in a guild"))?
-            .0;
+            .get();
         let forms = handler.module::<Forms>()?.forms.read().await;
         let contents = forms
             .iter()
@@ -622,9 +608,10 @@ impl BotCommand for ListForms {
                 )
             })
             .join("\n");
-        let mut embed = CreateEmbed::default();
-        embed.title("Registered forms").description(contents);
-        Ok(CommandResponse::Embed(embed))
+        let embed = CreateEmbed::default()
+            .title("Registered forms")
+            .description(contents);
+        Ok(CommandResponse::Embed(Box::new(embed)))
     }
 }
 
@@ -664,15 +651,15 @@ impl SimpleForm {
         &self,
         handler: &Handler,
         _ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
         submission_type: &str,
     ) -> anyhow::Result<CommandResponse> {
         let user = &interaction.user;
-        let user_handle = if user.discriminator == 0 {
+        let user_handle = if let Some(discriminator) = user.discriminator {
+            format!("{}#{:04}", &user.name, discriminator)
+        } else {
             // new username format
             format!("@{}", &user.name)
-        } else {
-            format!("{}#{:04}", &user.name, user.discriminator)
         };
 
         let forms: &Forms = handler.module()?;
@@ -700,8 +687,8 @@ impl SimpleForm {
                 .options
                 .iter()
                 .find(|opt| opt.name == sanitized)
-                .and_then(|opt| match &opt.resolved {
-                    Some(CommandDataOptionValue::String(s)) => Some(s.clone()),
+                .and_then(|opt| match &opt.value {
+                    CommandDataOptionValue::String(s) => Some(s.clone()),
                     _ => None,
                 })
                 .or_else(|| next_value.take());
@@ -839,7 +826,7 @@ impl BotCommand for GetSubmissions {
         self,
         handler: &Handler,
         _ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let forms: &Forms = handler.module()?;
         let forms = forms.forms.read().await;
@@ -864,7 +851,7 @@ impl Forms {
         handler: &'a Handler,
         ctx: &'a Context,
         _key: CommandKey<'a>,
-        ac: &'a AutocompleteInteraction,
+        ac: &'a CommandInteraction,
     ) -> BoxFuture<'a, anyhow::Result<bool>> {
         async move { process_autocomplete(handler, ctx, ac).await }.boxed()
     }
@@ -872,13 +859,13 @@ impl Forms {
     pub fn process_form_command<'a>(
         handler: &'a Handler,
         ctx: &'a Context,
-        cmd: &'a ApplicationCommandInteraction,
+        cmd: &'a CommandInteraction,
     ) -> BoxFuture<'a, anyhow::Result<CommandResponse>> {
         async move {
             let guild_id = cmd
                 .guild_id
                 .ok_or_else(|| anyhow!("Must be run in a server"))?
-                .0;
+                .get();
             let data = &cmd.data;
             let forms = handler.module::<Forms>()?.forms.read().await;
             let form = forms

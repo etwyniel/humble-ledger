@@ -2,16 +2,17 @@ use std::collections::hash_map::DefaultHasher;
 use std::sync::Arc;
 use std::{env, hash::Hasher};
 
+use anyhow::Context as _;
 use rspotify::scopes;
 use rusqlite::Connection;
+use serenity::all::{ApplicationId, CommandDataOptionValue};
 use serenity::async_trait;
-use serenity::model::application::command::Command;
-use serenity::model::prelude::interaction::Interaction;
+use serenity::model::application::Command;
+use serenity::model::prelude::Interaction;
 use serenity::model::prelude::{ChannelPinsUpdateEvent, Presence};
 use serenity::prelude::{Context, EventHandler};
 use serenity::{
-    model::channel::Message, model::prelude::interaction::application_command::CommandDataOption,
-    prelude::GatewayIntents,
+    model::application::CommandDataOption, model::channel::Message, prelude::GatewayIntents,
 };
 // use youtube::Youtube;
 
@@ -32,15 +33,17 @@ pub fn get_str_opt_ac<'a>(options: &'a [CommandDataOption], name: &str) -> Optio
     options
         .iter()
         .find(|opt| opt.name == name)
-        .and_then(|opt| opt.value.as_ref())
-        .and_then(|val| val.as_str())
+        .and_then(|opt| opt.value.as_str())
 }
 
 pub fn get_focused_option(options: &[CommandDataOption]) -> Option<&str> {
-    options
-        .iter()
-        .find(|opt| opt.focused)
-        .map(|opt| opt.name.as_str())
+    options.iter().find_map(|opt| {
+        if let CommandDataOptionValue::Autocomplete { value, .. } = &opt.value {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
 }
 
 #[derive(Eq, PartialEq)]
@@ -55,12 +58,10 @@ struct HandlerWrapper(Handler);
 impl EventHandler for HandlerWrapper {
     async fn ready(&self, ctx: Context, data_about_bot: serenity::model::gateway::Ready) {
         _ = self.0.http.set(Arc::clone(&ctx.http));
-        let commands = Command::get_global_application_commands(&ctx.http)
-            .await
-            .unwrap();
+        let commands = Command::get_global_commands(&ctx.http).await.unwrap();
         for cmd in commands {
             if cmd.name == "build_playlist" {
-                Command::delete_global_application_command(&ctx.http, cmd.id)
+                Command::delete_global_command(&ctx.http, cmd.id)
                     .await
                     .unwrap();
             }
@@ -70,24 +71,22 @@ impl EventHandler for HandlerWrapper {
         for runner in self.0.commands.read().await.0.values() {
             if let Some(guild) = runner.guild() {
                 guild
-                    .create_application_command(&ctx.http, |command| runner.register(command))
+                    .create_command(&ctx.http, runner.register())
                     .await
                     .unwrap();
             } else {
-                Command::create_global_application_command(&ctx.http, |command| {
-                    runner.register(command)
-                })
-                .await
-                .unwrap();
+                Command::create_global_command(&ctx.http, runner.register())
+                    .await
+                    .unwrap();
             }
         }
         forms::check_forms(&self.0, &ctx).await.unwrap();
     }
 
     async fn message(&self, ctx: Context, new_message: Message) {
-        if new_message.author.id.0 == 513626599330152458 {
+        if new_message.author.id.get() == 513626599330152458 {
             let mut hasher = DefaultHasher::new();
-            hasher.write_u64(new_message.id.0);
+            hasher.write_u64(new_message.id.get());
             let val = hasher.finish();
             if val % 150 == 0 {
                 new_message.react(&ctx.http, '🖕').await.unwrap();
@@ -156,21 +155,28 @@ async fn build_handler() -> anyhow::Result<Handler> {
         "user-read-private",
         "playlist-modify-private"
     ))
-    .await?;
+    .await
+    .context("spotify client")?;
 
     Ok(Handler::builder(conn)
         .module::<Forms>()
-        .await?
+        .await
+        .context("forms module")?
         .with_module(polls)
-        .await?
+        .await
+        .context("polls module")?
         .with_module(spotify_oauth)
-        .await?
+        .await
+        .context("spotify module")?
         .module::<AcquiringTaste>()
-        .await?
+        .await
+        .context("att module")?
         .module::<SpotifyActivity>()
-        .await?
+        .await
+        .context("spotify activity module")?
         .module::<Pinboard>()
-        .await?
+        .await
+        .context("pinboard module")?
         .default_command_handler(Forms::process_form_command)
         .build())
 }
@@ -196,7 +202,7 @@ async fn main() {
             | GatewayIntents::GUILDS,
     )
     .event_handler(HandlerWrapper(handler))
-    .application_id(application_id)
+    .application_id(ApplicationId::new(application_id))
     .await
     .expect("Error creating client");
 

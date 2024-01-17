@@ -1,7 +1,8 @@
 use std::borrow::Borrow;
 
 use anyhow::anyhow;
-use serenity::model::prelude::interaction::autocomplete::AutocompleteInteraction;
+use serenity::all::CommandInteraction;
+use serenity::builder::{CreateAutocompleteResponse, CreateInteractionResponse};
 use serenity::model::prelude::UserId;
 
 use rspotify::clients::BaseClient;
@@ -22,7 +23,9 @@ async fn get_now_playing(
 ) -> anyhow::Result<Option<(String, String)>> {
     let spotify: &Spotify = handler.module()?;
     let activity: &SpotifyActivity = handler.module()?;
-    let Some(np) = activity.user_now_playing(user_id).await else {return Ok(None);};
+    let Some(np) = activity.user_now_playing(user_id).await else {
+        return Ok(None);
+    };
     let track = spotify.client.track(np.clone()).await?;
     let name = format!(
         "{} - {}",
@@ -65,12 +68,12 @@ async fn autocomplete_link(
 pub async fn process_autocomplete(
     handler: &Handler,
     ctx: &Context,
-    ac: &AutocompleteInteraction,
+    ac: &CommandInteraction,
 ) -> anyhow::Result<bool> {
     let guild_id = ac
         .guild_id
         .ok_or_else(|| anyhow!("Must be run in a server"))?
-        .0;
+        .get();
     let choices: Vec<_>;
     let options = &ac.data.options;
     let forms: &Forms = handler.module()?;
@@ -116,15 +119,14 @@ pub async fn process_autocomplete(
             }
         }
     }
-    ac.create_autocomplete_response(&ctx.http, |r| {
-        choices.into_iter().for_each(|(name, value)| {
-            if !(name.is_empty() || value.is_empty()) {
+    let resp =
+        choices
+            .into_iter()
+            .fold(CreateAutocompleteResponse::new(), |resp, (name, value)| {
                 let len = 100.min(name.len());
-                r.add_string_choice(&name[..len], value);
-            }
-        });
-        r
-    })
-    .await?;
+                resp.add_string_choice(&name[..len], value)
+            });
+    ac.create_response(&ctx.http, CreateInteractionResponse::Autocomplete(resp))
+        .await?;
     Ok(true)
 }

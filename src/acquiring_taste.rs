@@ -11,16 +11,9 @@ use rspotify::{
 };
 use serenity::{
     async_trait,
+    builder::{CreateInteractionResponse, EditInteractionResponse},
     client::Context,
-    model::{
-        prelude::{
-            interaction::{
-                application_command::ApplicationCommandInteraction, InteractionResponseType,
-            },
-            GuildId, RoleId,
-        },
-        Permissions,
-    },
+    model::{application::CommandInteraction, Permissions},
 };
 use tokio::task::JoinSet;
 
@@ -34,8 +27,8 @@ use serenity_command_handler::{
 
 const FORM_SPREADSHEET: &str = "1Hxm4SiZF7NWLvVIkK2RrnGIwFEZaoC1vR6_zl5e2TcI";
 const USER_ID: &str = "cq21khhkkhy88fo9nsthvqkft";
-const GUILD_ID: GuildId = GuildId(400572085300101120);
-const HIGH_TASTE: RoleId = RoleId(427894012238757908);
+// const GUILD_ID: GuildId = GuildId::new(400572085300101120);
+// const HIGH_TASTE: RoleId = RoleId::new(427894012238757908);
 
 #[derive(Clone, Debug)]
 pub struct AcquiringTastePick {
@@ -226,7 +219,10 @@ async fn build_playlist<'a, 'b: 'a>(
                 return None;
             };
             let Some(id) = url.path().strip_prefix("/track/") else {
-                invalid.push((pick.clone(), format!("not a spotify track url: <{}>", &pick.link)));
+                invalid.push((
+                    pick.clone(),
+                    format!("not a spotify track url: <{}>", &pick.link),
+                ));
                 return None;
             };
             match TrackId::from_id_or_uri(id) {
@@ -263,8 +259,8 @@ async fn get_acquiring_taste_submissions(
         .context("failed to get submissions")?
         .1;
     let Some(values) = rows.values else {
-            bail!("No submissions found on this sheet");
-        };
+        bail!("No submissions found on this sheet");
+    };
     let picks = values
         .into_iter()
         .map(|row| AcquiringTastePick {
@@ -416,12 +412,13 @@ impl BotCommand for BuildPlaylist {
         self,
         handler: &Handler,
         ctx: &Context,
-        interaction: &ApplicationCommandInteraction,
+        interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         interaction
-            .create_interaction_response(&ctx.http, |r| {
-                r.kind(InteractionResponseType::DeferredChannelMessageWithSource)
-            })
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(Default::default()),
+            )
             .await?;
         let res = build_playlist_from_picks(handler, ctx, !self.reuse.unwrap_or(false))
             .await
@@ -431,7 +428,7 @@ impl BotCommand for BuildPlaylist {
             Err(e) => e.to_string(),
         };
         interaction
-            .edit_original_interaction_response(&ctx.http, |msg| msg.content(&resp))
+            .edit_response(&ctx.http, EditInteractionResponse::new().content(&resp))
             .await?;
         Ok(CommandResponse::None)
     }
