@@ -28,7 +28,7 @@ async fn get_now_playing(
     let Some(np) = activity.user_now_playing(user_id).await else {
         return Ok(None);
     };
-    let track = spotify.client.track(np.clone()).await?;
+    let track = spotify.client.track(np.clone(), None).await?;
     let name = format!(
         "{} - {}",
         Spotify::artists_to_string(&track.artists),

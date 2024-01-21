@@ -28,6 +28,7 @@ mod complete;
 mod forms;
 mod spotify_activity;
 // mod youtube;
+mod lp;
 
 pub fn get_str_opt_ac<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
     options
@@ -94,7 +95,11 @@ impl EventHandler for HandlerWrapper {
                 new_message.react(&ctx.http, '👍').await.unwrap();
             }
         }
-        // _ = spotify::handle_message(&ctx.http, &new_message).await;
+
+        let spotify = self.0.module::<SpotifyOAuth>()
+            .expect("Could not find spotify module");
+        self.0.module::<lp::LP>().expect("LP module not found")
+            .handle_message(&spotify.client, &new_message).await;
     }
 
     async fn presence_update(&self, _: Context, presence: Presence) {
@@ -145,8 +150,11 @@ impl EventHandler for HandlerWrapper {
 }
 
 async fn build_handler() -> anyhow::Result<Handler> {
+
+    let lp = lp::LP::new();
+
     let conn = Connection::open("humble_ledger.sqlite")?;
-    let polls = ModPoll::new("✅", "❎", "▶️", None, "<a:crabrave:996854529742094417>");
+    let polls = ModPoll::new("✅", "❎", "▶️", None, "<a:crabrave:996854529742094417>", lp.clone() );
     let spotify_oauth = SpotifyOAuth::new_auth_code(scopes!(
         "playlist-modify-public",
         "playlist-read-private",
@@ -181,6 +189,9 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .await
         .context("lp module")?
         .default_command_handler(Forms::process_form_command)
+        .with_module(lp)
+        .await
+        .context("LP module")?
         .build())
 }
 
