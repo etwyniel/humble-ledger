@@ -4,9 +4,10 @@ use itertools::Itertools;
 use regex::Regex;
 use rspotify::clients::BaseClient;
 use serenity::builder::{
-    CreateAllowedMentions, CreateInteractionResponse,
+    CreateAllowedMentions, CreateEmbed, CreateInteractionResponse,
     CreateInteractionResponseMessage, EditInteractionResponse, EditMessage,
 };
+use serenity::model::application;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
 use serenity::prelude::RwLock;
@@ -32,6 +33,7 @@ pub struct TrackInfo {
 
 #[derive(Debug)]
 pub struct AlbumInfo {
+    pub id: String,
     pub artist: String,
     pub name: String,
     pub uri: Option<String>,
@@ -41,6 +43,7 @@ pub struct AlbumInfo {
 #[derive(Debug)]
 pub struct LPInfo {
     pub playlist: AlbumInfo,
+
     pub started: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -53,6 +56,18 @@ enum PlayState<'a> {
     },
 }
 
+trait MaybeUri {
+    fn maybe_uri<S: AsRef<str>>(&self, mb_uri: Option<S>) -> String;
+}
+
+impl MaybeUri for String {
+    fn maybe_uri<S: AsRef<str>>(&self, mb_uri: Option<S>) -> String {
+        match mb_uri {
+            None => self.clone(),
+            Some(uri) => format!("[{}]({})", self, uri.as_ref()),
+        }
+    }
+}
 impl LPInfo {
     fn now_playing(&self) -> PlayState {
         let started = match self.started {
@@ -84,6 +99,48 @@ impl LPInfo {
         // remain = now - started - sum(track duration)
         // How long ago the playlist finished
         PlayState::Finished(remain)
+    }
+
+    fn build_embed(&self) -> Box<CreateEmbed> {
+        let lp_name =
+            format!("{} - {}", &self.playlist.artist, &self.playlist.name,)
+                .maybe_uri(self.playlist.uri.as_ref());
+        let mut embed = CreateEmbed::new().description(format!(
+            "{} - \\[{}\\]",
+            lp_name,
+            display_duration(
+                &self.playlist.tracks.iter().map(|t| t.duration).sum()
+            )
+        ));
+        match self.now_playing() {
+            PlayState::NotStarted => {
+                embed = embed.title("Listening Party has not started yet.");
+            }
+            PlayState::Finished(_) => {
+                embed = embed.title("Listening Party has finished.");
+            }
+            PlayState::Playing { track, position } => {
+                let track_uri_ctx = track
+                    .uri
+                    .as_ref()
+                    .map(|uri| format!("{}?context={}", uri, self.playlist.id));
+                embed = embed
+                    .title("Listening Party in full swing! Join in!")
+                    .field(
+                        "Now playing",
+                        format!(
+                            "Track {} - {} - {} / {}",
+                            track.number,
+                            track.name.maybe_uri(track_uri_ctx),
+                            display_duration(&position),
+                            display_duration(&track.duration)
+                        ),
+                        true,
+                    );
+            }
+        }
+
+        Box::new(embed)
     }
 }
 
@@ -133,6 +190,7 @@ async fn fetch_album_info<C: BaseClient>(
         .try_collect::<Vec<TrackInfo>>()
         .await?;
     Ok(AlbumInfo {
+        id: album.id.to_string(),
         artist: artists.clone(),
         name: album.name.to_string(),
         uri: album.external_urls.get("spotify").map(|s| s.to_owned()),
@@ -157,57 +215,13 @@ impl BotCommand for CurrentLP {
         let lpmod = data.module::<LP>().unwrap();
         let lps = lpmod.last_pinged.read().await;
         let lp = lps.get(&channel);
-        let msg = match lp {
-            None => {
-                "There is no listening party at the moment.".to_string()
-            }
-            Some(lpinfo) => {
-                let playlist_duration: chrono::Duration =
-                    lpinfo.playlist.tracks.iter().map(|t| t.duration).sum();
-                let album_uri_str = match &lpinfo.playlist.uri {
-                    None => "No album link available".to_string(),
-                    // Use angle brackets to suppress link preview
-                    Some(uri) => format!("Album: <{}>", &uri),
-                };
-                let now_playing = match lpinfo.now_playing() {
-                    PlayState::NotStarted => "Not yet started.".to_string(),
-                    PlayState::Finished(end) => {
-                        format!("LP ended {} ago", display_duration(&end))
-                    }
-                    PlayState::Playing { track, position } => format!(
-                        "Playing Track {}: `{}` at **{}** / {}",
-                        &track.number,
-                        &track.name,
-                        display_duration(&position),
-                        display_duration(&track.duration)
-                    ),
-                };
-                format!(
-                    "Ongoing Listening Party:\n {} - {} ({}) \n {} \n {}",
-                    &lpinfo.playlist.artist,
-                    &lpinfo.playlist.name,
-                    display_duration(&playlist_duration),
-                    &now_playing,
-                    album_uri_str,
-                )
-            }
+        let response = match lp {
+            None => CommandResponse::Public(
+                "There is no listening party at the moment.".to_string(),
+            ),
+            Some(lpinfo) => CommandResponse::Embed(lpinfo.build_embed()),
         };
-
-        let http = &ctx.http;
-        interaction
-            .create_response(
-                http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(msg)
-                        .allowed_mentions(
-                            CreateAllowedMentions::new().empty_users(),
-                        ),
-                ),
-            )
-            .await
-            .context("error creating response")?;
-        Ok(CommandResponse::None)
+        Ok(response)
     }
 }
 
