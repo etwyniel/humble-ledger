@@ -1,13 +1,10 @@
 use anyhow::Context as _;
-use futures_util::stream::TryStreamExt;
+use futures_util::stream::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use regex::Regex;
 use rspotify::clients::BaseClient;
-use serenity::builder::{
-    CreateAllowedMentions, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse, EditMessage,
-};
-use serenity::model::application;
+use rspotify::model::{PlayableItem, PlaylistItem};
+use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
 use serenity::prelude::RwLock;
@@ -25,26 +22,135 @@ use serenity_command_handler::{
 
 #[derive(Debug)]
 pub struct TrackInfo {
-    pub number: u32,
+    pub number: usize,
     pub name: String,
     pub uri: Option<String>,
     pub duration: chrono::Duration,
 }
 
 #[derive(Debug)]
-pub struct AlbumInfo {
-    pub id: String,
-    pub artist: String,
-    pub name: String,
-    pub uri: Option<String>,
-    pub tracks: Vec<TrackInfo>,
+enum PlaylistInfo {
+    AlbumInfo {
+        id: String,
+        artist: String,
+        name: String,
+        uri: Option<String>,
+    },
+    PlaylistInfo {
+        id: String,
+        name: String,
+        uri: Option<String>,
+    },
 }
 
 #[derive(Debug)]
 pub struct LPInfo {
-    pub playlist: AlbumInfo,
+    playlist: PlaylistInfo,
+    tracks: Vec<TrackInfo>,
+    started: Option<chrono::DateTime<chrono::Utc>>,
+}
 
-    pub started: Option<chrono::DateTime<chrono::Utc>>,
+impl LPInfo {
+    async fn from_spotify_album_id<C: BaseClient>(
+        client: &C,
+        album_id_str: &str,
+    ) -> anyhow::Result<Self> {
+        let album_id = rspotify::model::AlbumId::from_id(album_id_str)
+            .context("trying to parse album ID")?;
+
+        let album = client
+            .album(album_id.clone(), None)
+            .await
+            .context("fetching album")?;
+        let artists = album
+            .artists
+            .iter()
+            .map(|a| a.name.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("Album pinged: {} - {} ", &artists, &album.name); // Debug
+        let tracks = client
+            .album_track(album_id, None)
+            .enumerate()
+            .map(|(count, mb)| mb.map(|x| (count, x)))
+            .map_ok(|(count, track)| TrackInfo {
+                number: count,
+                name: track.name.to_string(),
+                duration: track.duration.clone(),
+                uri: track.external_urls.get("spotify").map(|s| s.to_owned()),
+            })
+            .try_collect::<Vec<TrackInfo>>()
+            .await?;
+
+        Ok(LPInfo {
+            playlist: PlaylistInfo::AlbumInfo {
+                id: album.id.to_string(),
+                artist: artists.clone(),
+                name: album.name.to_string(),
+                uri: album.external_urls.get("spotify").map(|s| s.to_owned()),
+            },
+            tracks,
+            started: None,
+        })
+    }
+    async fn from_spotify_playlist_id<C: BaseClient>(
+        client: &C,
+        album_id_str: &str,
+    ) -> anyhow::Result<Self> {
+        let playlist_id = rspotify::model::PlaylistId::from_id(album_id_str)
+            .context("trying to parse playlist ID")?;
+
+        let playlist = client
+            .playlist(playlist_id.clone(), None, None)
+            .await
+            .context("fetching playlist")?;
+
+        eprintln!("Playlist pinged: {}", &playlist.name); // Debug
+        let items = client
+            .playlist_items(playlist_id, None, None)
+            .try_collect::<Vec<PlaylistItem>>()
+            .await?;
+        let tracks = items
+            .iter()
+            .enumerate()
+            .filter_map(|(count, item)| {
+                item.track.as_ref().map(|track| match track {
+                    PlayableItem::Track(track) => TrackInfo {
+                        number: count + 1,
+                        name: track.name.to_string(),
+                        duration: track.duration.clone(),
+                        uri: track
+                            .external_urls
+                            .get("spotify")
+                            .map(|s| s.to_owned()),
+                    },
+                    // Why are there episodes in your playlist?
+                    PlayableItem::Episode(episode) => TrackInfo {
+                        number: count + 1,
+                        name: episode.name.to_string(),
+                        duration: episode.duration.clone(),
+                        uri: episode
+                            .external_urls
+                            .get("spotify")
+                            .map(|s| s.to_owned()),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(LPInfo {
+            playlist: PlaylistInfo::PlaylistInfo {
+                id: playlist.id.to_string(),
+                name: playlist.name.to_string(),
+                uri: playlist
+                    .external_urls
+                    .get("spotify")
+                    .map(|s| s.to_owned()),
+            },
+            tracks,
+            started: None,
+        })
+    }
 }
 
 enum PlayState<'a> {
@@ -56,18 +162,17 @@ enum PlayState<'a> {
     },
 }
 
-trait MaybeUri {
-    fn maybe_uri<S: AsRef<str>>(&self, mb_uri: Option<S>) -> String;
-}
-
-impl MaybeUri for String {
-    fn maybe_uri<S: AsRef<str>>(&self, mb_uri: Option<S>) -> String {
-        match mb_uri {
-            None => self.clone(),
-            Some(uri) => format!("[{}]({})", self, uri.as_ref()),
-        }
+// Turn a string into a link if an URI is available.
+fn maybe_uri<S: AsRef<str>, T: AsRef<str>>(
+    text: T,
+    mb_uri: Option<S>,
+) -> String {
+    match mb_uri.as_ref() {
+        None => text.as_ref().to_string(),
+        Some(uri) => format!("[{}]({})", text.as_ref(), uri.as_ref()),
     }
 }
+
 impl LPInfo {
     fn now_playing(&self) -> PlayState {
         let started = match self.started {
@@ -85,7 +190,7 @@ impl LPInfo {
             return PlayState::NotStarted;
         }
         let mut remain = now - started;
-        for track in self.playlist.tracks.iter() {
+        for track in self.tracks.iter() {
             if track.duration > remain {
                 return PlayState::Playing {
                     track: &track,
@@ -102,15 +207,27 @@ impl LPInfo {
     }
 
     fn build_embed(&self) -> Box<CreateEmbed> {
-        let lp_name =
-            format!("{} - {}", &self.playlist.artist, &self.playlist.name,)
-                .maybe_uri(self.playlist.uri.as_ref());
+        let (lp_name, lp_id) = match &self.playlist {
+            PlaylistInfo::AlbumInfo {
+                id,
+                artist,
+                name,
+                uri,
+            } => {
+                let album_name =
+                    maybe_uri(format!("{artist} - {name}"), uri.as_ref());
+                (format!("**Album**:\n {album_name}"), id.clone())
+            }
+            PlaylistInfo::PlaylistInfo { id, name, uri } => {
+                let playlist_name = maybe_uri(name, uri.as_ref());
+                (format!("**Playlist**:\n {playlist_name}"), id.clone())
+            }
+        };
+
         let mut embed = CreateEmbed::new().description(format!(
             "{} - \\[{}\\]",
             lp_name,
-            display_duration(
-                &self.playlist.tracks.iter().map(|t| t.duration).sum()
-            )
+            display_duration(&self.tracks.iter().map(|t| t.duration).sum())
         ));
         match self.now_playing() {
             PlayState::NotStarted => {
@@ -123,7 +240,7 @@ impl LPInfo {
                 let track_uri_ctx = track
                     .uri
                     .as_ref()
-                    .map(|uri| format!("{}?context={}", uri, self.playlist.id));
+                    .map(|uri| format!("{}?context={}", uri, &lp_id));
                 embed = embed
                     .title("Listening Party in full swing! Join in!")
                     .field(
@@ -131,7 +248,7 @@ impl LPInfo {
                         format!(
                             "Track {} - {} - {} / {}",
                             track.number,
-                            track.name.maybe_uri(track_uri_ctx),
+                            maybe_uri(&track.name, track_uri_ctx.as_ref()),
                             display_duration(&position),
                             display_duration(&track.duration)
                         ),
@@ -161,42 +278,8 @@ fn display_duration(duration: &chrono::Duration) -> String {
 const SPOTIFY_ALBUM_RE: &str =
     "\\bhttps://open.spotify.com/album/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)\\b";
 
-async fn fetch_album_info<C: BaseClient>(
-    client: &C,
-    album_id_str: &str,
-) -> anyhow::Result<AlbumInfo> {
-    let album_id = rspotify::model::AlbumId::from_id(album_id_str)
-        .context("trying to parse album ID")?;
-
-    let album = client
-        .album(album_id.clone(), None)
-        .await
-        .context("fetching album")?;
-    let artists = album
-        .artists
-        .iter()
-        .map(|a| a.name.as_ref())
-        .collect::<Vec<_>>()
-        .join(", ");
-    eprintln!("Album pinged: {} - {} ", &artists, &album.name); // Debug
-    let tracks = client
-        .album_track(album_id, None)
-        .map_ok(|track| TrackInfo {
-            number: track.track_number,
-            name: track.name.to_string(),
-            duration: track.duration.clone(),
-            uri: track.external_urls.get("spotify").map(|s| s.to_owned()),
-        })
-        .try_collect::<Vec<TrackInfo>>()
-        .await?;
-    Ok(AlbumInfo {
-        id: album.id.to_string(),
-        artist: artists.clone(),
-        name: album.name.to_string(),
-        uri: album.external_urls.get("spotify").map(|s| s.to_owned()),
-        tracks,
-    })
-}
+const SPOTIFY_PLAYLIST_RE: &str =
+    "\\bhttps://open.spotify.com/playlist/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)\\b";
 
 #[derive(Command, Debug)]
 #[cmd(name = "lp", desc = "Check if listening party is going")]
@@ -208,7 +291,7 @@ impl BotCommand for CurrentLP {
     async fn run(
         self,
         data: &Handler,
-        ctx: &Context,
+        _ctx: &Context,
         interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let channel = interaction.channel_id;
@@ -248,7 +331,8 @@ impl polls::ModPollReadyHandler for LP {
 
 // Roles used for pinging listening parties
 const LP_ROLES: &'static [u64] = &[
-    1198354637137391709, // @Listening Party in test guild
+    1198354637137391709, // `@Listening Party`` in test guild
+                         // TODO: Make this configurable? Fetch via name?
 ];
 
 impl LP {
@@ -266,34 +350,45 @@ impl LP {
     ) {
         let msg_txt: &str = &msg.content;
 
-        // Check if the specified roles
+        // Check if the specified roles were mentioned
         if msg
             .mention_roles
             .iter()
             .any(|&role| LP_ROLES.iter().contains(&role.get()))
         {
-            let album = match Regex::new(&SPOTIFY_ALBUM_RE)
-                .unwrap()
-                .captures(&msg_txt)
-            {
-                None => return,
-                Some(caps) => match fetch_album_info(client, &caps[1]).await {
-                    Err(e) => {
-                        eprintln!("Error resolving ping: {}", e);
-                        return;
-                    }
-                    Ok(album) => album,
-                },
+            let mb_pl = 'regex: {
+                // Check for spotify playlist URL
+                if let Some(caps) =
+                    Regex::new(&SPOTIFY_ALBUM_RE).unwrap().captures(&msg_txt)
+                {
+                    break 'regex (LPInfo::from_spotify_album_id(
+                        client, &caps[1],
+                    )
+                    .await);
+                }
+                // Check for spotify playlist URL
+                if let Some(caps) =
+                    Regex::new(&SPOTIFY_PLAYLIST_RE).unwrap().captures(&msg_txt)
+                {
+                    break 'regex LPInfo::from_spotify_playlist_id(
+                        client, &caps[1],
+                    )
+                    .await;
+                }
+                // No regexes match
+                return;
             };
+            let pl = match mb_pl {
+                Err(e) => {
+                    eprintln!("Error resolving ping: {}", e);
+                    return;
+                }
+                Ok(pl) => pl,
+            };
+
             let mut channels = self.last_pinged.write().await;
 
-            (*channels).insert(
-                msg.channel_id,
-                LPInfo {
-                    playlist: album,
-                    started: None,
-                },
-            );
+            (*channels).insert(msg.channel_id, pl);
             eprintln!("Found pinged LP!");
             ()
         };
@@ -325,7 +420,7 @@ impl Module for LP {
         store.register::<CurrentLP>();
     }
 
-    async fn init(m: &ModuleMap) -> anyhow::Result<Self> {
+    async fn init(_m: &ModuleMap) -> anyhow::Result<Self> {
         Ok(LP {
             last_pinged: Default::default(),
         })
