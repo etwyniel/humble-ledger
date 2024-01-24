@@ -3,7 +3,7 @@ use futures_util::stream::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use regex::Regex;
 use rspotify::clients::BaseClient;
-use rspotify::model::{PlayableItem, PlaylistItem};
+use rspotify::model::{PlayableItem, PlaylistItem, FullTrack, FullEpisode};
 use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
@@ -115,24 +115,22 @@ impl LPInfo {
             .enumerate()
             .filter_map(|(count, item)| {
                 item.track.as_ref().map(|track| match track {
-                    PlayableItem::Track(track) => TrackInfo {
+                    PlayableItem::Track(FullTrack {
+                        name,
+                        duration,
+                        external_urls,
+                        ..
+                    })
+                    | PlayableItem::Episode(FullEpisode {
+                        name,
+                        duration,
+                        external_urls,
+                        ..
+                    }) => TrackInfo {
                         number: count + 1,
-                        name: track.name.to_string(),
-                        duration: track.duration.clone(),
-                        uri: track
-                            .external_urls
-                            .get("spotify")
-                            .map(|s| s.to_owned()),
-                    },
-                    // Why are there episodes in your playlist?
-                    PlayableItem::Episode(episode) => TrackInfo {
-                        number: count + 1,
-                        name: episode.name.to_string(),
-                        duration: episode.duration.clone(),
-                        uri: episode
-                            .external_urls
-                            .get("spotify")
-                            .map(|s| s.to_owned()),
+                        name: name.to_string(),
+                        duration: duration.clone(),
+                        uri: external_urls.get("spotify").map(|s| s.to_owned()),
                     },
                 })
             })
