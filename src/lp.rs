@@ -1,9 +1,10 @@
 use anyhow::Context as _;
 use futures_util::stream::{StreamExt, TryStreamExt};
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use rspotify::clients::BaseClient;
-use rspotify::model::{PlayableItem, PlaylistItem, FullTrack, FullEpisode};
+use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
 use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
@@ -273,11 +274,36 @@ fn display_duration(duration: &chrono::Duration) -> String {
 }
 
 // Regex to identity spotify album URIs and extract album id
-const SPOTIFY_ALBUM_RE: &str =
-    "\\bhttps://open.spotify.com/album/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)\\b";
+static SPOTIFY_ALBUM_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        "\\bhttps://open.spotify.com(?:/intl-[a-z]+)?\
+            /album/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)?\\b",
+    )
+    .unwrap()
+});
 
-const SPOTIFY_PLAYLIST_RE: &str =
-    "\\bhttps://open.spotify.com/playlist/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)\\b";
+// Find spotify playlist URI and extract the album ID
+fn match_spotify_album(string: &str) -> Option<&str> {
+    SPOTIFY_ALBUM_RE
+        .captures(string.as_ref())
+        .map(|caps| caps.get(1).unwrap().as_str())
+}
+
+// Regex to identity spotify playlist URIs and extract album id
+const SPOTIFY_PLAYLIST_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        "\\bhttps://open.spotify.com(?:/intl-[a-z]+)?\
+           /playlist/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)?\\b",
+    )
+    .unwrap()
+});
+
+// Find spotify playlist URI and extract the album ID
+fn match_spotify_playlist(string: &str) -> Option<&str> {
+    SPOTIFY_PLAYLIST_RE
+        .captures(string.as_ref())
+        .map(|caps| caps.get(1).unwrap().as_str())
+}
 
 #[derive(Command, Debug)]
 #[cmd(name = "lp", desc = "Check if listening party is going")]
@@ -356,22 +382,14 @@ impl LP {
         {
             let mb_pl = 'regex: {
                 // Check for spotify playlist URL
-                if let Some(caps) =
-                    Regex::new(&SPOTIFY_ALBUM_RE).unwrap().captures(&msg_txt)
-                {
-                    break 'regex (LPInfo::from_spotify_album_id(
-                        client, &caps[1],
-                    )
-                    .await);
+                if let Some(aid) = match_spotify_album(&msg_txt) {
+                    break 'regex (LPInfo::from_spotify_album_id(client, aid)
+                        .await);
                 }
                 // Check for spotify playlist URL
-                if let Some(caps) =
-                    Regex::new(&SPOTIFY_PLAYLIST_RE).unwrap().captures(&msg_txt)
-                {
-                    break 'regex LPInfo::from_spotify_playlist_id(
-                        client, &caps[1],
-                    )
-                    .await;
+                if let Some(pid) = match_spotify_playlist(&msg_txt) {
+                    break 'regex LPInfo::from_spotify_playlist_id(client, pid)
+                        .await;
                 }
                 // No regexes match
                 return;
@@ -422,5 +440,51 @@ impl Module for LP {
         Ok(LP {
             last_pinged: Default::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_spotify_album_parses() {
+        let aid = "4ddRx20FxcGU2ZJhateVym";
+
+        let uris: &'static [&'static str] = &[
+            "https://open.spotify.com/album/4ddRx20FxcGU2ZJhateVym", // regular
+            "https://open.spotify.com/album/4ddRx20FxcGU2ZJhateVym\
+                ?si=RQNX_vP_SN6Ct4haVZeHDA", // ?si=
+            "https://open.spotify.com/intl-de/album\
+             /4ddRx20FxcGU2ZJhateVym", // intl
+            "https://open.spotify.com/intl-de/album\
+             /4ddRx20FxcGU2ZJhateVym?si=RQNX_vP_SN6Ct4haVZeHDA", // intl + ?si=
+        ];
+
+        for uri in uris {
+            assert_eq!(match_spotify_album(uri), Some(aid));
+        }
+    }
+
+    #[test]
+    fn match_spotify_playlist_parses() {
+        let pid = "5Yy6oc82tIR8k25BdHcsdq";
+
+        let uris: &'static [&'static str] = &[
+            //regular
+            "https://open.spotify.com/playlist/5Yy6oc82tIR8k25BdHcsdq",
+            // ?si=
+            "https://open.spotify.com/playlist/5Yy6oc82tIR8k25BdHcsdq\
+                 ?si=574a09e801af4003",
+            // intl
+            "https://open.spotify.com/intl-de/playlist/5Yy6oc82tIR8k25BdHcsdq",
+            // intl + ?si=
+            "https://open.spotify.com/intl-de/playlist/5Yy6oc82tIR8k25BdHcsdq\
+                 ?si=574a09e801af4003",
+        ];
+
+        for uri in uris {
+            assert_eq!(match_spotify_playlist(uri), Some(pid));
+        }
     }
 }
