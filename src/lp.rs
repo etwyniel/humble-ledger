@@ -150,6 +150,22 @@ impl LPInfo {
             started: None,
         })
     }
+
+    // Find spotify album or playlist in line and fetch info
+    async fn from_match_string<C: BaseClient>(
+        client: &C,
+        string: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        if let Some(aid) = match_spotify_album(string) {
+            return Ok(Some(Self::from_spotify_album_id(client, aid).await?));
+        }
+        if let Some(pid) = match_spotify_playlist(string) {
+            return Ok(Some(
+                Self::from_spotify_playlist_id(client, pid).await?,
+            ));
+        }
+        return Ok(None);
+    }
 }
 
 enum PlayState<'a> {
@@ -380,33 +396,18 @@ impl LP {
             .iter()
             .any(|&role| LP_ROLES.iter().contains(&role.get()))
         {
-            let mb_pl = 'regex: {
-                // Check for spotify playlist URL
-                if let Some(aid) = match_spotify_album(&msg_txt) {
-                    break 'regex (LPInfo::from_spotify_album_id(client, aid)
-                        .await);
-                }
-                // Check for spotify playlist URL
-                if let Some(pid) = match_spotify_playlist(&msg_txt) {
-                    break 'regex LPInfo::from_spotify_playlist_id(client, pid)
-                        .await;
-                }
-                // No regexes match
-                return;
-            };
-            let pl = match mb_pl {
+            let pl = match LPInfo::from_match_string(client, msg_txt).await {
                 Err(e) => {
-                    eprintln!("Error resolving ping: {}", e);
+                    eprintln!("Error resolving spotify link: {}", e);
                     return;
                 }
-                Ok(pl) => pl,
+                Ok(Some(pl)) => pl,
+                Ok(None) => return,
             };
 
             let mut channels = self.last_pinged.write().await;
 
             (*channels).insert(msg.channel_id, pl);
-            eprintln!("Found pinged LP!");
-            ()
         };
     }
 
