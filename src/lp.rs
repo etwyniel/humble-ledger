@@ -8,14 +8,17 @@ use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
 use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
-use serenity::prelude::RwLock;
 use serenity::{async_trait, prelude::Context};
 use serenity_command::{BotCommand, CommandResponse};
 use serenity_command_derive::Command;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
+use serenity_command_handler::events; // serenity-command-handler, for hooking
 use serenity_command_handler::modules::polls; // serenity-command-handler, for hooking
+use serenity_command_handler::modules::polls::ReadyPollStarted;
+use serenity_command_handler::modules::Spotify;
 
 use serenity_command_handler::{
     CommandStore, CompletionStore, Handler, HandlerBuilder, Module, ModuleMap,
@@ -75,7 +78,7 @@ impl LPInfo {
             .enumerate()
             .map(|(count, mb)| mb.map(|x| (count, x)))
             .map_ok(|(count, track)| TrackInfo {
-                number: count,
+                number: count + 1,
                 name: track.name.to_string(),
                 duration: track.duration.clone(),
                 uri: track.external_urls.get("spotify").map(|s| s.to_owned()),
@@ -336,7 +339,7 @@ impl BotCommand for CurrentLP {
     ) -> anyhow::Result<CommandResponse> {
         let channel = interaction.channel_id;
         let lpmod = data.module::<LP>().unwrap();
-        let lps = lpmod.last_pinged.read().await;
+        let lps = lpmod.last_pinged.read().unwrap();
         let lp = lps.get(&channel);
         let response = match lp {
             None => CommandResponse::Public(
@@ -359,13 +362,6 @@ impl Clone for LP {
         LP {
             last_pinged: self.last_pinged.clone(),
         }
-    }
-}
-
-#[async_trait]
-impl polls::ModPollReadyHandler for LP {
-    async fn ready(&self, channelid: &ChannelId) {
-        self.start_lp(channelid).await;
     }
 }
 
@@ -405,19 +401,18 @@ impl LP {
                 Ok(None) => return,
             };
 
-            let mut channels = self.last_pinged.write().await;
+            let mut channels = self.last_pinged.write().unwrap();
 
             (*channels).insert(msg.channel_id, pl);
         };
     }
 
-    pub async fn start_lp(&self, channel: &ChannelId) {
+    pub fn start_lp(&self, channel: &ChannelId) {
         let now = chrono::offset::Utc::now();
-        let mut channels = self.last_pinged.write().await;
+        let mut channels = self.last_pinged.write().unwrap();
         channels
             .entry(*channel)
             .and_modify(|lp_info| lp_info.started = Some(now));
-        ()
     }
 }
 
@@ -426,8 +421,21 @@ impl Module for LP {
     async fn add_dependencies(
         builder: HandlerBuilder,
     ) -> anyhow::Result<HandlerBuilder> {
-        Ok(builder)
+        builder.module::<Spotify>().await
     }
+
+    fn register_event_handlers(&self, handlers: &mut events::EventHandlers) {
+        let channels = Arc::clone(&self.last_pinged);
+        handlers.add_handler(move |ReadyPollStarted { channel }| {
+            let now = chrono::offset::Utc::now();
+            channels
+                .write()
+                .unwrap()
+                .entry(channel.clone())
+                .and_modify(|lp_info| lp_info.started = Some(now));
+        });
+    }
+
     fn register_commands(
         &self,
         store: &mut CommandStore,
@@ -438,9 +446,7 @@ impl Module for LP {
     }
 
     async fn init(_m: &ModuleMap) -> anyhow::Result<Self> {
-        Ok(LP {
-            last_pinged: Default::default(),
-        })
+        Ok(Self::new())
     }
 }
 

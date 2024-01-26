@@ -150,11 +150,8 @@ impl EventHandler for HandlerWrapper {
 }
 
 async fn build_handler() -> anyhow::Result<Handler> {
-
-    let lp = lp::LP::new();
-
     let conn = Connection::open("humble_ledger.sqlite")?;
-    let polls = ModPoll::new("✅", "❎", "▶️", None, "<a:crabrave:996854529742094417>", lp.clone() );
+    let polls = ModPoll::new("✅", "❎", "▶️", None, "<a:crabrave:996854529742094417>");
     let spotify_oauth = SpotifyOAuth::new_auth_code(scopes!(
         "playlist-modify-public",
         "playlist-read-private",
@@ -189,7 +186,7 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .await
         .context("lp module")?
         .default_command_handler(Forms::process_form_command)
-        .with_module(lp)
+        .module::<lp::LP>()
         .await
         .context("LP module")?
         .build())
