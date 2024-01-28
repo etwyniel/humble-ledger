@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use serenity_command_handler::events; // serenity-command-handler, for hooking
-use serenity_command_handler::modules::polls; // serenity-command-handler, for hooking
+
 use serenity_command_handler::modules::polls::ReadyPollStarted;
 use serenity_command_handler::modules::Spotify;
 
@@ -325,7 +325,7 @@ fn match_spotify_playlist(string: &str) -> Option<&str> {
 }
 
 #[derive(Command, Debug)]
-#[cmd(name = "lp", desc = "Check if listening party is going")]
+#[cmd(name = "lp_info", desc = "Check if listening party is going")]
 pub struct CurrentLP {}
 
 #[async_trait]
@@ -360,7 +360,7 @@ pub struct LP {
 impl Clone for LP {
     fn clone(&self) -> Self {
         LP {
-            last_pinged: self.last_pinged.clone(),
+            last_pinged: Arc::clone(&self.last_pinged),
         }
     }
 }
@@ -407,6 +407,7 @@ impl LP {
         };
     }
 
+    // Set the Listening party as started
     pub fn start_lp(&self, channel: &ChannelId) {
         let now = chrono::offset::Utc::now();
         let mut channels = self.last_pinged.write().unwrap();
@@ -425,14 +426,9 @@ impl Module for LP {
     }
 
     fn register_event_handlers(&self, handlers: &mut events::EventHandlers) {
-        let channels = Arc::clone(&self.last_pinged);
+        let this = self.clone();
         handlers.add_handler(move |ReadyPollStarted { channel }| {
-            let now = chrono::offset::Utc::now();
-            channels
-                .write()
-                .unwrap()
-                .entry(channel.clone())
-                .and_modify(|lp_info| lp_info.started = Some(now));
+            this.start_lp(channel);
         });
     }
 

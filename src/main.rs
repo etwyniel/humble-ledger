@@ -28,7 +28,7 @@ mod complete;
 mod forms;
 mod spotify_activity;
 // mod youtube;
-mod lp;
+mod lp_info;
 
 pub fn get_str_opt_ac<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
     options
@@ -98,8 +98,8 @@ impl EventHandler for HandlerWrapper {
 
         let spotify = self.0.module::<SpotifyOAuth>()
             .expect("Could not find spotify module");
-        self.0.module::<lp::LP>().expect("LP module not found")
             .handle_message(&spotify.client, &new_message).await;
+        self.0.module::<lp_info::LP>().expect("LP module not found")
     }
 
     async fn presence_update(&self, _: Context, presence: Presence) {
@@ -186,7 +186,7 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .await
         .context("lp module")?
         .default_command_handler(Forms::process_form_command)
-        .module::<lp::LP>()
+        .module::<lp_info::LP>()
         .await
         .context("LP module")?
         .build())
