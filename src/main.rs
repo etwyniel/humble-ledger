@@ -98,8 +98,8 @@ impl EventHandler for HandlerWrapper {
 
         let spotify = self.0.module::<SpotifyOAuth>()
             .expect("Could not find spotify module");
-            .handle_message(&spotify.client, &new_message).await;
         self.0.module::<lp_info::LP>().expect("LP module not found")
+            .handle_message(&spotify.client, &ctx, &new_message).await;
     }
 
     async fn presence_update(&self, _: Context, presence: Presence) {

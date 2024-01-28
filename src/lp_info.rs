@@ -366,9 +366,9 @@ impl Clone for LP {
 }
 
 // Roles used for pinging listening parties
-const LP_ROLES: &'static [u64] = &[
-    1198354637137391709, // `@Listening Party`` in test guild
-                         // TODO: Make this configurable? Fetch via name?
+const LP_ROLES: &'static [&'static str] = &[
+    &"Listening Party", // `@Listening Party`` in test guild
+    &"Impromptu Listening Party",
 ];
 
 impl LP {
@@ -382,6 +382,7 @@ impl LP {
     pub async fn handle_message<C: BaseClient>(
         &self,
         client: &C,
+        ctx: &Context,
         msg: &Message,
     ) {
         let msg_txt: &str = &msg.content;
@@ -390,7 +391,14 @@ impl LP {
         if msg
             .mention_roles
             .iter()
-            .any(|&role| LP_ROLES.iter().contains(&role.get()))
+            // Resolve ID to role
+            .filter_map(|rid| {
+                rid.to_role_cached(&ctx.cache).or_else(||{
+                    eprintln!("Role {rid} not found");
+                    None
+                })
+            })
+            .any(|role| LP_ROLES.contains(&role.name.as_ref()))
         {
             let pl = match LPInfo::from_match_string(client, msg_txt).await {
                 Err(e) => {
