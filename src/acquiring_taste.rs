@@ -425,7 +425,10 @@ impl BotCommand for BuildPlaylist {
             .context("Error getting new submissions");
         let resp = match res {
             Ok(resp) => resp,
-            Err(e) => e.to_string(),
+            Err(e) => {
+                eprintln!("{e:?}");
+                e.to_string()
+            }
         };
         interaction
             .edit_response(&ctx.http, EditInteractionResponse::new().content(&resp))

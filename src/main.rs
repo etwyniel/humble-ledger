@@ -20,7 +20,7 @@ use serenity_command_handler::Handler;
 
 use acquiring_taste::AcquiringTaste;
 use forms::Forms;
-use serenity_command_handler::modules::{spotify, ModPoll, Pinboard, SpotifyOAuth};
+use serenity_command_handler::modules::{spotify, ModLp, ModPoll, Pinboard, SpotifyOAuth};
 use spotify_activity::SpotifyActivity;
 
 mod acquiring_taste;
@@ -177,6 +177,9 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .module::<Pinboard>()
         .await
         .context("pinboard module")?
+        .module::<ModLp>()
+        .await
+        .context("lp module")?
         .default_command_handler(Forms::process_form_command)
         .build())
 }
