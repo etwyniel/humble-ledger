@@ -1,6 +1,7 @@
-use std::{cmp::Ordering, sync::Arc, time::Duration};
+use std::{cmp::Ordering, sync::Arc};
 
 use anyhow::{anyhow, bail, Context as _};
+use chrono::Duration;
 use fallible_iterator::FallibleIterator;
 use google_sheets4::Sheets;
 use hyper::{client::HttpConnector, Body, Method, Request, StatusCode};
@@ -34,6 +35,8 @@ use serenity_command_handler::{
 };
 
 use crate::complete::process_autocomplete;
+
+const DEFAULT_RANGE: &str = "B:Z";
 
 // use crate::{spotify, Handler};
 
@@ -318,7 +321,7 @@ impl SimpleForm {
                 .set_autocomplete(autocomplete);
             if let QuestionType::Choice(values) = &q.ty {
                 opt = values
-                    .into_iter()
+                    .iter()
                     .fold(opt, |opt, v| opt.add_string_choice(v, v));
             }
             cmd = cmd.add_option(opt);
@@ -359,6 +362,7 @@ pub struct FormCommand {
     pub command_id: u64,
     pub form: SimpleForm,
     pub submission_type: String,
+    pub submissions_range: Option<String>,
 }
 
 #[derive(Command, Debug)]
@@ -448,6 +452,7 @@ impl CommandFromForm {
             command_id: cmd.id.get(),
             form,
             submission_type,
+            submissions_range: None,
         };
         let mut forms = forms.forms.write().await;
         if let Some(form) = forms
@@ -615,9 +620,56 @@ impl BotCommand for ListForms {
     }
 }
 
+#[derive(Command, Debug)]
+#[cmd(
+    name = "override_form_submissions_range",
+    desc = "To use if submissions don't go to the first tab of the linked sheet"
+)]
+pub struct OverrideSubmissionsRange {
+    #[cmd(desc = "The name of the command", autocomplete)]
+    pub command_name: String,
+    #[cmd(desc = "The range containing the responses, e.g. \"Tab 2\"!B:F")]
+    pub range: Option<String>,
+}
+
+#[async_trait]
+impl BotCommand for OverrideSubmissionsRange {
+    type Data = Handler;
+    const PERMISSIONS: Permissions = Permissions::MANAGE_EVENTS;
+
+    async fn run(
+        self,
+        handler: &Handler,
+        _ctx: &Context,
+        interaction: &CommandInteraction,
+    ) -> anyhow::Result<CommandResponse> {
+        let guild_id = interaction
+            .guild_id
+            .ok_or_else(|| anyhow!("Must be run in a guild"))?
+            .get();
+        let module = handler.module::<Forms>()?;
+        let mut forms = module.forms.write().await;
+        let form = forms
+            .iter_mut()
+            .find(|form| form.guild_id == guild_id && form.command_name == self.command_name)
+            .ok_or_else(|| anyhow!("Command {} not found", &self.command_name))?;
+        form.submissions_range = self.range.clone();
+        let db = handler.db.lock().await;
+        db.conn
+            .execute(
+                "UPDATE forms SET submissions_range = ?3 WHERE guild_id = ?1 AND command_name = ?2",
+                params![guild_id, &self.command_name, self.range.as_deref(),],
+            )
+            .context("Failed to update submissions range")?;
+        let range = self.range.as_deref().unwrap_or(DEFAULT_RANGE);
+        let resp = format!("Will search for submissions in `{range}`");
+        Ok(CommandResponse::Public(resp))
+    }
+}
+
 pub fn load_forms(db: &Connection) -> anyhow::Result<Vec<FormCommand>> {
     let mut stmt =
-        db.prepare("SELECT guild_id, command_name, command_id, form, submission_type FROM forms")?;
+        db.prepare("SELECT guild_id, command_name, command_id, form, submission_type, submissions_range FROM forms")?;
     let commands = stmt
         .query([])?
         .map(|row| {
@@ -627,6 +679,7 @@ pub fn load_forms(db: &Connection) -> anyhow::Result<Vec<FormCommand>> {
                 command_id: row.get(2)?,
                 form: serde_json::from_slice(row.get::<_, String>(3)?.as_bytes()).unwrap(),
                 submission_type: row.get(4)?,
+                submissions_range: row.get(5)?,
             })
         })
         .collect::<Vec<_>>()?;
@@ -715,7 +768,7 @@ impl SimpleForm {
                     }
                 } else {
                     let song = spotify.get_song_from_url(&value).await?;
-                    if song.duration > Duration::from_secs(60 * 45) {
+                    if song.duration > Duration::seconds(60 * 45) {
                         bail!("This song is too long!")
                     }
                     let song_info = format!(
@@ -750,14 +803,14 @@ impl SimpleForm {
         }
 
         let contents = if !song_infos.is_empty() {
-            format!(
-                "Submitted {} to {}\n{}",
-                song_infos.iter().rev().join(", "), // questions were processed in reverse order
-                &self.title,
-                song_urls.iter().rev().join("\n")
-            )
+            let songs = song_infos
+                .iter()
+                .zip(&song_urls)
+                .map(|(info, url)| format!("[{info}]({url})"))
+                .join(", ");
+            format!("Submitted {songs} to **{}**", &self.title)
         } else {
-            format!("Submitted to {}", &self.title)
+            format!("Submitted to **{}**", &self.title)
         };
         Ok(CommandResponse::Private(contents))
     }
@@ -766,6 +819,7 @@ impl SimpleForm {
         &self,
         handler: &Handler,
         user: &User,
+        range: Option<&str>,
     ) -> anyhow::Result<CommandResponse> {
         let Some(sheet_id) = &self.sheet_id else {
             bail!("No linked spreadsheet, cannot check submissions");
@@ -774,7 +828,7 @@ impl SimpleForm {
             .module::<Forms>()?
             .sheets_client
             .spreadsheets()
-            .values_get(sheet_id, "A:Z")
+            .values_get(sheet_id, range.unwrap_or(DEFAULT_RANGE))
             .doit()
             .await?
             .1;
@@ -782,10 +836,10 @@ impl SimpleForm {
             bail!("No submissions found on this sheet");
         };
         let username = user.name.to_lowercase();
-        let mut resp = values
+        let rows = values
             .into_iter()
             .filter(|row| {
-                row.get(1)
+                row.get(0)
                     .map(|submitter| {
                         submitter
                             .trim_start_matches('@')
@@ -794,13 +848,16 @@ impl SimpleForm {
                     })
                     .unwrap_or(false)
             })
+            .rev()
+            .take(5)
             .map(|row| {
                 row.iter()
-                    .skip(2) // skip timestamp and username
+                    .skip(1) // skip timestamp and username
                     .filter(|value| !(value.is_empty() || value.starts_with("https://")))
                     .join(" - ")
             })
-            .join("\n");
+            .collect_vec();
+        let mut resp = rows.iter().rev().join("\n");
         if resp.is_empty() {
             resp = format!(
                 "No submissions from user {} to form {}",
@@ -835,7 +892,11 @@ impl BotCommand for GetSubmissions {
             bail!("Command {} not found", cmd_name);
         };
         form.form
-            .get_submissions_for_user(handler, &interaction.user)
+            .get_submissions_for_user(
+                handler,
+                &interaction.user,
+                form.submissions_range.as_deref(),
+            )
             .await
     }
 }
@@ -901,6 +962,7 @@ impl Module for Forms {
                 command_id INTEGER NOT NULL,
                 form STRING NOT NULL,
                 submission_type STRING NOT NULL DEFAULT('song'),
+                submissions_range STRING,
 
                 UNIQUE(guild_id, command_name)
             )",
@@ -940,6 +1002,7 @@ impl Module for Forms {
         store.register::<DeleteFormCommand>();
         store.register::<RefreshFormCommand>();
         store.register::<GetSubmissions>();
+        store.register::<OverrideSubmissionsRange>();
 
         completions.push(Forms::complete_forms);
     }

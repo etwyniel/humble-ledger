@@ -13,7 +13,9 @@ use serenity_command_handler::command_context::{get_focused_option, get_str_opt_
 use serenity_command_handler::modules::Spotify;
 use serenity_command_handler::prelude::*;
 
-use crate::forms::{DeleteFormCommand, Forms, GetSubmissions, RefreshFormCommand};
+use crate::forms::{
+    DeleteFormCommand, Forms, GetSubmissions, OverrideSubmissionsRange, RefreshFormCommand,
+};
 use crate::spotify_activity::SpotifyActivity;
 use crate::CompletionType;
 
@@ -79,7 +81,10 @@ pub async fn process_autocomplete(
     let forms: &Forms = handler.module()?;
     let cmd_name = ac.data.name.as_str();
     match cmd_name {
-        DeleteFormCommand::NAME | RefreshFormCommand::NAME | GetSubmissions::NAME => {
+        DeleteFormCommand::NAME
+        | RefreshFormCommand::NAME
+        | GetSubmissions::NAME
+        | OverrideSubmissionsRange::NAME => {
             let opt = get_str_opt_ac(options, "command_name").unwrap_or_default();
             choices = forms
                 .forms
