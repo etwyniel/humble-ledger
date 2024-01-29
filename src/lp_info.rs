@@ -5,7 +5,11 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rspotify::clients::BaseClient;
 use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
-use serenity::builder::CreateEmbed;
+use serenity::all::InteractionResponseFlags;
+use serenity::builder::{
+    CreateAllowedMentions, CreateEmbed, CreateInteractionResponse,
+    CreateInteractionResponseMessage, EditInteractionResponse, EditMessage,
+};
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
 use serenity::{async_trait, prelude::Context};
@@ -176,7 +180,7 @@ enum PlayState<'a> {
     Finished(chrono::Duration), // how long ago
     Playing {
         track: &'a TrackInfo,
-        position: chrono::Duration,
+        started: chrono::DateTime<chrono::offset::Utc>,
     },
 }
 
@@ -212,7 +216,7 @@ impl LPInfo {
             if track.duration > remain {
                 return PlayState::Playing {
                     track: &track,
-                    position: remain,
+                    started: now - remain,
                 };
             } else {
                 remain = remain - track.duration;
@@ -224,7 +228,7 @@ impl LPInfo {
         PlayState::Finished(remain)
     }
 
-    fn build_embed(&self) -> Box<CreateEmbed> {
+    fn build_info_embed(&self) -> CreateEmbed {
         let (lp_name, lp_id) = match &self.playlist {
             PlaylistInfo::AlbumInfo {
                 id,
@@ -254,7 +258,7 @@ impl LPInfo {
             PlayState::Finished(_) => {
                 embed = embed.title("Listening Party has finished.");
             }
-            PlayState::Playing { track, position } => {
+            PlayState::Playing { track, started } => {
                 let track_uri_ctx = track
                     .uri
                     .as_ref()
@@ -264,18 +268,17 @@ impl LPInfo {
                     .field(
                         "Now playing",
                         format!(
-                            "Track {} - {} - {} / {}",
+                            "Track {} - {} - ({})\nStarted <t:{}:R>",
                             track.number,
                             maybe_uri(&track.name, track_uri_ctx.as_ref()),
-                            display_duration(&position),
-                            display_duration(&track.duration)
+                            display_duration(&track.duration),
+                            started.timestamp(),
                         ),
                         true,
                     );
             }
         }
-
-        Box::new(embed)
+        embed
     }
 }
 
@@ -324,9 +327,13 @@ fn match_spotify_playlist(string: &str) -> Option<&str> {
         .map(|caps| caps.get(1).unwrap().as_str())
 }
 
+
 #[derive(Command, Debug)]
 #[cmd(name = "lp_info", desc = "Check if listening party is going")]
-pub struct CurrentLP {}
+pub struct CurrentLP {
+    #[cmd(desc = "Should the answer be visible to everyone?")]
+    visible: Option<bool>,
+}
 
 #[async_trait]
 impl BotCommand for CurrentLP {
@@ -334,22 +341,31 @@ impl BotCommand for CurrentLP {
     async fn run(
         self,
         data: &Handler,
-        _ctx: &Context,
+        ctx: &Context,
         interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
-        let channel = interaction.channel_id;
-        let lpmod = data.module::<LP>().unwrap();
-        let lps = lpmod.last_pinged.read().unwrap();
-        let lp = lps.get(&channel);
-        let response = match lp {
-            None => CommandResponse::Public(
-                "There is no listening party at the moment.".to_string(),
-            ),
-            Some(lpinfo) => CommandResponse::Embed(lpinfo.build_embed()),
+        let mut msg = {
+            // Find last LP
+            let lps = data.module::<LP>().unwrap().last_pinged.read().unwrap();
+            let lp = lps.get(&interaction.channel_id);
+            match lp {
+                None => CreateInteractionResponseMessage::new()
+                    .content("There is no listening party at the moment."),
+                Some(lpinfo) => CreateInteractionResponseMessage::new()
+                    .add_embed(lpinfo.build_info_embed()),
+            }
         };
-        Ok(response)
+
+        if !self.visible.unwrap_or(false) {
+            msg = msg.flags(InteractionResponseFlags::EPHEMERAL);
+        }
+        interaction
+            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+            .await?;
+        Ok(CommandResponse::None)
     }
 }
+
 
 pub type PingedMap = Arc<RwLock<HashMap<ChannelId, LPInfo>>>;
 
@@ -393,7 +409,7 @@ impl LP {
             .iter()
             // Resolve ID to role
             .filter_map(|rid| {
-                rid.to_role_cached(&ctx.cache).or_else(||{
+                rid.to_role_cached(&ctx.cache).or_else(|| {
                     eprintln!("Role {rid} not found");
                     None
                 })
