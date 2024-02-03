@@ -7,8 +7,7 @@ use rspotify::clients::BaseClient;
 use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
 use serenity::all::InteractionResponseFlags;
 use serenity::builder::{
-    CreateAllowedMentions, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse, EditMessage,
+    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage,
 };
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
@@ -180,7 +179,7 @@ enum PlayState<'a> {
     Finished(chrono::Duration), // how long ago
     Playing {
         track: &'a TrackInfo,
-        started: chrono::DateTime<chrono::offset::Utc>,
+        position: chrono::Duration,
     },
 }
 
@@ -196,7 +195,8 @@ fn maybe_uri<S: AsRef<str>, T: AsRef<str>>(
 }
 
 impl LPInfo {
-    fn now_playing(&self) -> PlayState {
+    // Calculate what's playing after `offset`
+    fn now_playing(&self, offset: chrono::Duration) -> PlayState {
         let started = match self.started {
             None => {
                 return PlayState::NotStarted;
@@ -211,12 +211,12 @@ impl LPInfo {
             );
             return PlayState::NotStarted;
         }
-        let mut remain = now - started;
+        let mut remain = now - started + offset;
         for track in self.tracks.iter() {
             if track.duration > remain {
                 return PlayState::Playing {
                     track: &track,
-                    started: now - remain,
+                    position: remain,
                 };
             } else {
                 remain = remain - track.duration;
@@ -228,6 +228,7 @@ impl LPInfo {
         PlayState::Finished(remain)
     }
 
+    // Build discord embed for lp_info
     fn build_info_embed(&self) -> CreateEmbed {
         let (lp_name, lp_id) = match &self.playlist {
             PlaylistInfo::AlbumInfo {
@@ -251,14 +252,17 @@ impl LPInfo {
             lp_name,
             display_duration(&self.tracks.iter().map(|t| t.duration).sum())
         ));
-        match self.now_playing() {
+        match self.now_playing(chrono::Duration::seconds(0)) {
             PlayState::NotStarted => {
                 embed = embed.title("Listening Party has not started yet.");
             }
             PlayState::Finished(_) => {
                 embed = embed.title("Listening Party has finished.");
             }
-            PlayState::Playing { track, started } => {
+            PlayState::Playing {
+                track, position, ..
+            } => {
+                let now = chrono::offset::Utc::now();
                 let track_uri_ctx = track
                     .uri
                     .as_ref()
@@ -268,14 +272,50 @@ impl LPInfo {
                     .field(
                         "Now playing",
                         format!(
-                            "Track {} - {} - ({})\nStarted <t:{}:R>",
+                            "Track {} - {} - ({})\nTrack started <t:{}:R>",
                             track.number,
                             maybe_uri(&track.name, track_uri_ctx.as_ref()),
                             display_duration(&track.duration),
-                            started.timestamp(),
+                            (now - position).timestamp(),
                         ),
                         true,
                     );
+            }
+        }
+        embed
+    }
+
+    // Build discord embed for lp_join
+    fn build_join_embed(&self, offset: chrono::Duration) -> CreateEmbed {
+        let lp_id = match &self.playlist {
+            PlaylistInfo::AlbumInfo { id, .. }
+            | PlaylistInfo::PlaylistInfo { id, .. } => id.clone(),
+        };
+        let mut embed = CreateEmbed::new();
+        match self.now_playing(offset) {
+            PlayState::NotStarted => {
+                embed = embed.title("Listening Party has not started yet.");
+            }
+            PlayState::Finished(_) => {
+                embed = embed.title("Listening Party has finished.");
+            }
+            PlayState::Playing { track, position } => {
+                let now = chrono::offset::Utc::now();
+                let track_uri_ctx = track
+                    .uri
+                    .as_ref()
+                    .map(|uri| format!("{}?context={}", uri, &lp_id));
+                embed = embed.title("Join this listening party").field(
+                    "Select song",
+                    format!(
+                        "Track: {} - ({})\nPosition **{}**\n Start playback: <t:{}:R>",
+                        maybe_uri(&track.name, track_uri_ctx.as_ref()),
+                        display_duration(&track.duration),
+                        display_duration(&position),
+                        (now + offset).timestamp()
+                    ),
+                    true,
+                );
             }
         }
         embed
@@ -327,7 +367,6 @@ fn match_spotify_playlist(string: &str) -> Option<&str> {
         .map(|caps| caps.get(1).unwrap().as_str())
 }
 
-
 #[derive(Command, Debug)]
 #[cmd(name = "lp_info", desc = "Check if listening party is going")]
 pub struct CurrentLP {
@@ -366,6 +405,45 @@ impl BotCommand for CurrentLP {
     }
 }
 
+#[derive(Command, Debug)]
+#[cmd(name = "lp_join", desc = "Join a listening party (privately)")]
+pub struct JoinLP {
+    #[cmd(desc = "Seconds to start playing")]
+    offset: Option<u64>,
+}
+
+#[async_trait]
+impl BotCommand for JoinLP {
+    type Data = Handler;
+    async fn run(
+        self,
+        data: &Handler,
+        ctx: &Context,
+        interaction: &CommandInteraction,
+    ) -> anyhow::Result<CommandResponse> {
+        let offset =
+        // This can overflow, but we don't really care
+        // garbage in, garbage out
+            chrono::Duration::seconds(self.offset.unwrap_or(15) as i64);
+        let msg = {
+            // Find last LP
+            let lps = data.module::<LP>().unwrap().last_pinged.read().unwrap();
+            let lp = lps.get(&interaction.channel_id);
+            match lp {
+                None => CreateInteractionResponseMessage::new()
+                    .content("There is no listening party at the moment."),
+                Some(lpinfo) => CreateInteractionResponseMessage::new()
+                    .add_embed(lpinfo.build_join_embed(offset)),
+            }
+        }
+        .flags(InteractionResponseFlags::EPHEMERAL);
+
+        interaction
+            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+            .await?;
+        Ok(CommandResponse::None)
+    }
+}
 
 pub type PingedMap = Arc<RwLock<HashMap<ChannelId, LPInfo>>>;
 
@@ -382,10 +460,8 @@ impl Clone for LP {
 }
 
 // Roles used for pinging listening parties
-const LP_ROLES: &'static [&'static str] = &[
-    &"Listening Party", // `@Listening Party`` in test guild
-    &"Impromptu Listening Party",
-];
+const LP_ROLES: &'static [&'static str] =
+    &[&"Listening Party", &"Impromptu Listening Party"];
 
 impl LP {
     pub fn new() -> Self {
@@ -424,9 +500,8 @@ impl LP {
                 Ok(Some(pl)) => pl,
                 Ok(None) => return,
             };
-
+            // Store album/playlist in channel info
             let mut channels = self.last_pinged.write().unwrap();
-
             (*channels).insert(msg.channel_id, pl);
         };
     }
@@ -461,8 +536,8 @@ impl Module for LP {
         store: &mut CommandStore,
         _completions: &mut CompletionStore,
     ) {
-        eprintln!("Created LP module");
         store.register::<CurrentLP>();
+        store.register::<JoinLP>();
     }
 
     async fn init(_m: &ModuleMap) -> anyhow::Result<Self> {
