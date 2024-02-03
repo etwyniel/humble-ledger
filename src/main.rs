@@ -98,7 +98,7 @@ impl EventHandler for HandlerWrapper {
 
         let spotify = self.0.module::<SpotifyOAuth>()
             .expect("Could not find spotify module");
-        self.0.module::<lp_info::LP>().expect("LP module not found")
+        self.0.module::<lp_info::ModLPInfo>().expect("LP module not found")
             .handle_message(&spotify.client, &ctx, &new_message).await;
     }
 
@@ -186,7 +186,7 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .await
         .context("lp module")?
         .default_command_handler(Forms::process_form_command)
-        .module::<lp_info::LP>()
+        .module::<lp_info::ModLPInfo>()
         .await
         .context("LP module")?
         .build())
