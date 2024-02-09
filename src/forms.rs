@@ -463,7 +463,7 @@ impl CommandFromForm {
         } else {
             forms.push(command);
         }
-        Ok(CommandResponse::Public(resp))
+        CommandResponse::public(resp)
     }
 }
 
@@ -577,10 +577,7 @@ impl BotCommand for DeleteFormCommand {
             let mut forms = handler.module::<Forms>()?.forms.write().await;
             forms.retain(|form| form.command_name != self.command_name);
         }
-        Ok(CommandResponse::Public(format!(
-            "Deleted command {}",
-            &self.command_name
-        )))
+        CommandResponse::public(format!("Deleted command {}", &self.command_name))
     }
 }
 
@@ -616,7 +613,7 @@ impl BotCommand for ListForms {
         let embed = CreateEmbed::default()
             .title("Registered forms")
             .description(contents);
-        Ok(CommandResponse::Embed(Box::new(embed)))
+        CommandResponse::public(embed)
     }
 }
 
@@ -663,7 +660,7 @@ impl BotCommand for OverrideSubmissionsRange {
             .context("Failed to update submissions range")?;
         let range = self.range.as_deref().unwrap_or(DEFAULT_RANGE);
         let resp = format!("Will search for submissions in `{range}`");
-        Ok(CommandResponse::Public(resp))
+        CommandResponse::public(resp)
     }
 }
 
@@ -812,7 +809,7 @@ impl SimpleForm {
         } else {
             format!("Submitted to **{}**", &self.title)
         };
-        Ok(CommandResponse::Private(contents))
+        CommandResponse::private(contents)
     }
 
     pub async fn get_submissions_for_user(
@@ -864,7 +861,7 @@ impl SimpleForm {
                 &user.name, &self.title
             );
         }
-        Ok(CommandResponse::Private(resp))
+        CommandResponse::private(resp)
     }
 }
 
