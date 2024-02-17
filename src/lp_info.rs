@@ -4,14 +4,11 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rspotify::clients::BaseClient;
 use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
-use serenity::all::InteractionResponseFlags;
-use serenity::builder::{
-    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage,
-};
+use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
 use serenity::{async_trait, prelude::Context};
-use serenity_command::{BotCommand, CommandResponse};
+use serenity_command::{BotCommand, CommandResponse, ResponseType};
 use serenity_command_derive::Command;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -327,10 +324,11 @@ impl LPInfo {
                     .as_ref()
                     .map(|uri| format!("{}?context={}", uri, &lp_id));
                 embed = embed.title("Join this listening party").field(
-                    "Select song",
+                    "Select track",
                     format!(
-                        "Track: {} - ({})\nPosition **{}**\n Start playback:\
+                        "{} - {} - ({})\nGo to position **{}**\n Start playback:\
                          <t:{}:R>",
+                        track.number,
                         maybe_uri(&track.name, track_uri_ctx.as_ref()),
                         display_duration(track.duration),
                         display_duration(position),
@@ -402,29 +400,26 @@ impl BotCommand for CurrentLP {
     async fn run(
         self,
         data: &Handler,
-        ctx: &Context,
+        _ctx: &Context,
         interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
-        let mut msg = {
+        let msg: ResponseType = {
             // Find last LP
             let lps =
                 data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
             let lp = lps.get(&interaction.channel_id);
             match lp {
-                None => CreateInteractionResponseMessage::new()
-                    .content("There is no listening party at the moment."),
-                Some(lpinfo) => CreateInteractionResponseMessage::new()
-                    .add_embed(lpinfo.build_info_embed()),
+                None => "There is no listening party at the moment.".into(),
+
+                Some(lpinfo) => lpinfo.build_info_embed().into(),
             }
         };
 
-        if !self.visible.unwrap_or(false) {
-            msg = msg.flags(InteractionResponseFlags::EPHEMERAL);
+        if self.visible.unwrap_or(false) {
+            CommandResponse::public(msg)
+        } else {
+            CommandResponse::private(msg)
         }
-        interaction
-            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
-            .await?;
-        Ok(CommandResponse::None)
     }
 }
 
@@ -441,29 +436,22 @@ impl BotCommand for JoinLP {
     async fn run(
         self,
         data: &Handler,
-        ctx: &Context,
+        _ctx: &Context,
         interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
         let offset =
             chrono::Duration::seconds(self.offset.unwrap_or(15) as i64);
-        let msg = {
-            // Find last LP
-            let lps =
-                data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
-            let lp = lps.get(&interaction.channel_id);
-            match lp {
-                None => CreateInteractionResponseMessage::new()
-                    .content("There is no listening party at the moment."),
-                Some(lpinfo) => CreateInteractionResponseMessage::new()
-                    .add_embed(lpinfo.build_join_embed(offset)),
+        // Find last LP
+        let lps = data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
+        let lp = lps.get(&interaction.channel_id);
+        match lp {
+            None => CommandResponse::private(
+                "There is no listening party at the moment.",
+            ),
+            Some(lpinfo) => {
+                CommandResponse::private(lpinfo.build_join_embed(offset))
             }
         }
-        .flags(InteractionResponseFlags::EPHEMERAL);
-
-        interaction
-            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
-            .await?;
-        Ok(CommandResponse::None)
     }
 }
 
