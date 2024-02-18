@@ -28,6 +28,7 @@ mod complete;
 mod forms;
 mod spotify_activity;
 // mod youtube;
+mod lp_info;
 
 pub fn get_str_opt_ac<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
     options
@@ -94,7 +95,11 @@ impl EventHandler for HandlerWrapper {
                 new_message.react(&ctx.http, '👍').await.unwrap();
             }
         }
-        // _ = spotify::handle_message(&ctx.http, &new_message).await;
+
+        let spotify = self.0.module::<SpotifyOAuth>()
+            .expect("Could not find spotify module");
+        self.0.module::<lp_info::ModLPInfo>().expect("LP module not found")
+            .handle_message(&spotify.client, &ctx, &new_message).await;
     }
 
     async fn presence_update(&self, _: Context, presence: Presence) {
@@ -181,6 +186,9 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .await
         .context("lp module")?
         .default_command_handler(Forms::process_form_command)
+        .module::<lp_info::ModLPInfo>()
+        .await
+        .context("LP module")?
         .build())
 }
 
