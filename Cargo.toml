@@ -20,7 +20,6 @@ serenity-command-handler = { git = "https://github.com/etwyniel/discord_framewor
 serenity-command = { git = "https://github.com/etwyniel/discord_framework" }
 yup-oauth2 = "7.0.1"
 hyper = "0.14.20"
-hyper-native-tls = "0.3.0"
 google-sheets4 = "4.0.1"
 hyper-rustls = "0.23.0"
 hyper-tls = "0.5.0"
