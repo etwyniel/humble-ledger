@@ -351,7 +351,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa 1.0.10",
- "phf 0.10.1",
+ "phf 0.8.0",
  "smallvec",
 ]
 
@@ -1542,7 +1542,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3dfb61232e34fcb633f43d12c58f83c1df82962dcdfa565a4e866ffc17dafe12"
 dependencies = [
- "phf_macros 0.8.0",
+ "phf_macros",
  "phf_shared 0.8.0",
  "proc-macro-hack",
 ]
@@ -1553,9 +1553,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabbf1ead8a5bcbc20f5f8b939ee3f5b0f6f281b6ad3468b84656b658b455259"
 dependencies = [
- "phf_macros 0.10.0",
  "phf_shared 0.10.0",
- "proc-macro-hack",
 ]
 
 [[package]]
@@ -1606,20 +1604,6 @@ checksum = "7f6fde18ff429ffc8fe78e2bf7f8b7a5a5a6e2a8b58bc5a9ac69198bbda9189c"
 dependencies = [
  "phf_generator 0.8.0",
  "phf_shared 0.8.0",
- "proc-macro-hack",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58fdf3184dd560f160dd73922bea2d5cd6e8f064bf4b13110abd81b03697b4e0"
-dependencies = [
- "phf_generator 0.10.0",
- "phf_shared 0.10.0",
  "proc-macro-hack",
  "proc-macro2",
  "quote",
@@ -2362,7 +2346,7 @@ dependencies = [
 [[package]]
 name = "serenity-command"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#49238946bebb36332cc2dc32e16c4374f9abbe12"
+source = "git+https://github.com/etwyniel/discord_framework#30321c2f3d9ba7c1b2e4d5e11dbeb08cbb7be050"
 dependencies = [
  "anyhow",
  "serenity",
@@ -2371,7 +2355,7 @@ dependencies = [
 [[package]]
 name = "serenity-command-derive"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#49238946bebb36332cc2dc32e16c4374f9abbe12"
+source = "git+https://github.com/etwyniel/discord_framework#30321c2f3d9ba7c1b2e4d5e11dbeb08cbb7be050"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2382,7 +2366,7 @@ dependencies = [
 [[package]]
 name = "serenity-command-handler"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#49238946bebb36332cc2dc32e16c4374f9abbe12"
+source = "git+https://github.com/etwyniel/discord_framework#30321c2f3d9ba7c1b2e4d5e11dbeb08cbb7be050"
 dependencies = [
  "anyhow",
  "chrono",
