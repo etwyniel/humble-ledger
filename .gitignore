@@ -1,2 +1,6 @@
 /target
 token
+/dist/
+/humble_ledger.sqlite
+/credentials.json
+/bot.env
