@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rspotify::clients::BaseClient;
 use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
+use serenity::all::{GuildId, RoleId};
 use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::{ChannelId, Message};
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use serenity_command_handler::events; // serenity-command-handler, for hooking
+use serenity_command_handler::{events, RegisterableModule}; // serenity-command-handler, for hooking
 
 use serenity_command_handler::modules::polls::ReadyPollStarted;
 use serenity_command_handler::modules::Spotify;
@@ -62,8 +63,8 @@ impl LPInfo {
         client: &C,
         album_id_str: &str,
     ) -> anyhow::Result<Self> {
-        let album_id = rspotify::model::AlbumId::from_id(album_id_str)
-            .context("trying to parse album ID")?;
+        let album_id =
+            rspotify::model::AlbumId::from_id(album_id_str).context("trying to parse album ID")?;
 
         let album = client
             .album(album_id.clone(), None)
@@ -146,10 +147,7 @@ impl LPInfo {
             playlist: PlaylistInfo::PlaylistInfo {
                 id: playlist.id.to_string(),
                 name: playlist.name.to_string(),
-                uri: playlist
-                    .external_urls
-                    .get("spotify")
-                    .map(|s| s.to_owned()),
+                uri: playlist.external_urls.get("spotify").map(|s| s.to_owned()),
             },
             tracks,
             started: None,
@@ -165,9 +163,7 @@ impl LPInfo {
             return Ok(Some(Self::from_spotify_album_id(client, aid).await?));
         }
         if let Some(pid) = match_spotify_playlist(string) {
-            return Ok(Some(
-                Self::from_spotify_playlist_id(client, pid).await?,
-            ));
+            return Ok(Some(Self::from_spotify_playlist_id(client, pid).await?));
         }
         return Ok(None);
     }
@@ -189,10 +185,7 @@ enum PlayState<'a> {
 
 /// Turn a string into a markdown link if an URI is available.
 /// e.g. [mysong](htps://open.spotify.com/track/abcxyz)
-fn maybe_uri<S: AsRef<str>, T: AsRef<str>>(
-    text: T,
-    mb_uri: Option<S>,
-) -> String {
+fn maybe_uri<S: AsRef<str>, T: AsRef<str>>(text: T, mb_uri: Option<S>) -> String {
     match mb_uri.as_ref() {
         None => text.as_ref().to_string(),
         Some(uri) => format!("[{}]({})", text.as_ref(), uri.as_ref()),
@@ -242,8 +235,7 @@ impl LPInfo {
                 name,
                 uri,
             } => {
-                let album_name =
-                    maybe_uri(format!("{artist} - {name}"), uri.as_ref());
+                let album_name = maybe_uri(format!("{artist} - {name}"), uri.as_ref());
                 (format!("**Album**: {album_name}"), id.clone())
             }
             PlaylistInfo::PlaylistInfo { id, name, uri } => {
@@ -272,8 +264,7 @@ impl LPInfo {
                     .uri
                     .as_ref()
                     .map(|uri| format!("{}?context={}", uri, &lp_id));
-                let playlist_end =
-                    (self.started.unwrap() + playlist_duration).timestamp();
+                let playlist_end = (self.started.unwrap() + playlist_duration).timestamp();
                 embed = embed
                     .title("Listening Party in full swing! Join in!")
                     .field(
@@ -306,8 +297,9 @@ impl LPInfo {
     /// Build discord embed for lp_join
     fn build_join_embed(&self, offset: chrono::Duration) -> CreateEmbed {
         let lp_id = match &self.playlist {
-            PlaylistInfo::AlbumInfo { id, .. }
-            | PlaylistInfo::PlaylistInfo { id, .. } => id.clone(),
+            PlaylistInfo::AlbumInfo { id, .. } | PlaylistInfo::PlaylistInfo { id, .. } => {
+                id.clone()
+            }
         };
         let mut embed = CreateEmbed::new();
         match self.now_playing(offset) {
@@ -405,8 +397,7 @@ impl BotCommand for CurrentLP {
     ) -> anyhow::Result<CommandResponse> {
         let msg: ResponseType = {
             // Find last LP
-            let lps =
-                data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
+            let lps = data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
             let lp = lps.get(&interaction.channel_id);
             match lp {
                 None => "There is no listening party at the moment.".into(),
@@ -439,42 +430,39 @@ impl BotCommand for JoinLP {
         _ctx: &Context,
         interaction: &CommandInteraction,
     ) -> anyhow::Result<CommandResponse> {
-        let offset =
-            chrono::Duration::seconds(self.offset.unwrap_or(15) as i64);
+        let offset = chrono::Duration::seconds(self.offset.unwrap_or(15) as i64);
         // Find last LP
         let lps = data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
         let lp = lps.get(&interaction.channel_id);
         match lp {
-            None => CommandResponse::private(
-                "There is no listening party at the moment.",
-            ),
-            Some(lpinfo) => {
-                CommandResponse::private(lpinfo.build_join_embed(offset))
-            }
+            None => CommandResponse::private("There is no listening party at the moment."),
+            Some(lpinfo) => CommandResponse::private(lpinfo.build_join_embed(offset)),
         }
     }
 }
 
 pub struct ModLPInfo {
     last_pinged: Arc<RwLock<HashMap<ChannelId, LPInfo>>>,
+    lp_roles: Arc<RwLock<HashMap<GuildId, Vec<RoleId>>>>,
 }
 
 impl Clone for ModLPInfo {
     fn clone(&self) -> Self {
         ModLPInfo {
             last_pinged: Arc::clone(&self.last_pinged),
+            lp_roles: Arc::clone(&self.lp_roles),
         }
     }
 }
 
 // Roles used for pinging listening parties
-const LP_ROLES: &'static [&'static str] =
-    &[&"Listening Party", &"Impromptu Listening Party"];
+const LP_ROLES: &'static [&'static str] = &[&"Listening Party", &"Impromptu Listening Party"];
 
 impl ModLPInfo {
     pub fn new() -> Self {
         ModLPInfo {
             last_pinged: Default::default(),
+            lp_roles: Default::default(),
         }
     }
 
@@ -482,28 +470,29 @@ impl ModLPInfo {
     //
     // We consider a message a LP ping if if mentions one of the LP roles
     // and it contains a spotify playlist or album link
-    pub async fn handle_message<C: BaseClient>(
-        &self,
-        client: &C,
-        ctx: &Context,
-        msg: &Message,
-    ) {
+    pub async fn handle_message<C: BaseClient>(&self, client: &C, ctx: &Context, msg: &Message) {
         let msg_txt: &str = &msg.content;
 
         // Check if the specified roles were mentioned
+        let Some(guild_id) = msg.guild_id else { return };
+        if self.lp_roles.read().await.contains_key(&guild_id) {
+            let roles = ctx.http.get_guild_roles(guild_id).await.unwrap();
+            let lp_roles = roles
+                .iter()
+                .filter(|role| LP_ROLES.contains(&role.name.as_ref()))
+                .map(|role| role.id)
+                .collect();
+            self.lp_roles.write().await.insert(guild_id, lp_roles);
+        }
+        let lp_roles_map = self.lp_roles.read().await;
+        let Some(roles) = lp_roles_map.get(&guild_id) else {
+            return;
+        };
         if msg
             .mention_roles
             .iter()
             // Resolve ID to role
-            .filter_map(|rid| {
-                rid.to_role_cached(&ctx.cache).or_else(|| {
-                    // Message contains a role mention that does not resolve
-                    // to a role. Not much we can do.
-                    eprintln!("Role {rid} not found");
-                    None
-                })
-            })
-            .any(|role| LP_ROLES.contains(&role.name.as_ref()))
+            .any(|rid| roles.contains(rid))
         {
             let pl = match LPInfo::from_match_string(client, msg_txt).await {
                 Err(e) => {
@@ -552,12 +541,6 @@ impl ModLPInfo {
 
 #[async_trait]
 impl Module for ModLPInfo {
-    async fn add_dependencies(
-        builder: HandlerBuilder,
-    ) -> anyhow::Result<HandlerBuilder> {
-        builder.module::<Spotify>().await
-    }
-
     fn register_event_handlers(&self, handlers: &mut events::EventHandlers) {
         let that = self.clone();
         handlers.add_handler(move |ReadyPollStarted { channel }| {
@@ -569,13 +552,15 @@ impl Module for ModLPInfo {
         });
     }
 
-    fn register_commands(
-        &self,
-        store: &mut CommandStore,
-        _completions: &mut CompletionStore,
-    ) {
+    fn register_commands(&self, store: &mut CommandStore, _completions: &mut CompletionStore) {
         store.register::<CurrentLP>();
         store.register::<JoinLP>();
+    }
+}
+
+impl RegisterableModule for ModLPInfo {
+    async fn add_dependencies(builder: HandlerBuilder) -> anyhow::Result<HandlerBuilder> {
+        builder.module::<Spotify>().await
     }
 
     async fn init(_m: &ModuleMap) -> anyhow::Result<Self> {

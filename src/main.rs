@@ -5,7 +5,7 @@ use std::{env, hash::Hasher};
 use anyhow::Context as _;
 use rspotify::scopes;
 use rusqlite::Connection;
-use serenity::all::{ApplicationId, CommandDataOptionValue};
+use serenity::all::{ApplicationId, CommandDataOptionValue, GuildId};
 use serenity::async_trait;
 use serenity::model::application::Command;
 use serenity::model::prelude::Interaction;
@@ -16,18 +16,12 @@ use serenity::{
 };
 // use youtube::Youtube;
 
+use serenity_command_handler::modules::spotify_activity::SpotifyActivity;
 use serenity_command_handler::Handler;
 
-use acquiring_taste::AcquiringTaste;
-use forms::Forms;
-use serenity_command_handler::modules::{spotify, ModLp, ModPoll, Pinboard, SpotifyOAuth};
-use spotify_activity::SpotifyActivity;
-
-mod acquiring_taste;
-mod complete;
-mod forms;
-mod spotify_activity;
-// mod youtube;
+use serenity_command_handler::modules::{
+    forms, spotify, Forms, ModLp, ModPoll, Pinboard, PlaylistBuilder, SpotifyOAuth,
+};
 mod lp_info;
 
 pub fn get_str_opt_ac<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
@@ -47,12 +41,6 @@ pub fn get_focused_option(options: &[CommandDataOption]) -> Option<&str> {
     })
 }
 
-#[derive(Eq, PartialEq)]
-enum CompletionType {
-    Albums,
-    Songs,
-}
-
 struct HandlerWrapper(Handler);
 
 #[async_trait]
@@ -70,6 +58,29 @@ impl EventHandler for HandlerWrapper {
         self.0.self_id.set(data_about_bot.user.id).unwrap();
         eprintln!("{} is running!", &data_about_bot.user.name);
         for runner in self.0.commands.read().await.0.values() {
+            if runner.is_management() {
+                self.0
+                    .management_guild
+                    .create_command(&ctx, runner.register())
+                    .await
+                    .unwrap();
+                continue;
+            }
+            if runner.is_guild_command() {
+                let guilds = self
+                    .0
+                    .db
+                    .lock()
+                    .await
+                    .get_command_enabled_guilds(runner.name().0);
+                for guild_id in guilds {
+                    guild_id
+                        .create_command(&ctx.http, runner.register())
+                        .await
+                        .unwrap();
+                }
+                continue;
+            }
             if let Some(guild) = runner.guild() {
                 guild
                     .create_command(&ctx.http, runner.register())
@@ -96,10 +107,15 @@ impl EventHandler for HandlerWrapper {
             }
         }
 
-        let spotify = self.0.module::<SpotifyOAuth>()
+        let spotify = self
+            .0
+            .module::<SpotifyOAuth>()
             .expect("Could not find spotify module");
-        self.0.module::<lp_info::ModLPInfo>().expect("LP module not found")
-            .handle_message(&spotify.client, &ctx, &new_message).await;
+        self.0
+            .module::<lp_info::ModLPInfo>()
+            .expect("LP module not found")
+            .handle_message(&spotify.client, &ctx, &new_message)
+            .await;
     }
 
     async fn presence_update(&self, _: Context, presence: Presence) {
@@ -163,7 +179,13 @@ async fn build_handler() -> anyhow::Result<Handler> {
     .await
     .context("spotify client")?;
 
-    Ok(Handler::builder(conn)
+    let management_guild = env::var("MANAGEMENT_GUILD_ID")
+        .context("env variable MANAGEMENT_GUILD_ID missing")?
+        .parse::<u64>()
+        .context("Failed to parse MANAGEMENT_GUILD_ID")?;
+
+    Ok(Handler::builder(conn, GuildId::new(management_guild))
+        .await
         .module::<Forms>()
         .await
         .context("forms module")?
@@ -173,7 +195,7 @@ async fn build_handler() -> anyhow::Result<Handler> {
         .with_module(spotify_oauth)
         .await
         .context("spotify module")?
-        .module::<AcquiringTaste>()
+        .module::<PlaylistBuilder>()
         .await
         .context("att module")?
         .module::<SpotifyActivity>()
