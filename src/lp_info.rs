@@ -472,10 +472,13 @@ impl ModLPInfo {
     // and it contains a spotify playlist or album link
     pub async fn handle_message<C: BaseClient>(&self, client: &C, ctx: &Context, msg: &Message) {
         let msg_txt: &str = &msg.content;
+        if msg.mention_roles.is_empty() {
+            return;
+        }
 
         // Check if the specified roles were mentioned
         let Some(guild_id) = msg.guild_id else { return };
-        if self.lp_roles.read().await.contains_key(&guild_id) {
+        if !self.lp_roles.read().await.contains_key(&guild_id) {
             let roles = ctx.http.get_guild_roles(guild_id).await.unwrap();
             let lp_roles = roles
                 .iter()
