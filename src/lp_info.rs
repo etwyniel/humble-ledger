@@ -121,7 +121,7 @@ impl LPInfo {
             .iter()
             .enumerate()
             .filter_map(|(count, item)| {
-                item.track.as_ref().map(|track| match track {
+                item.track.as_ref().and_then(|track| match track {
                     PlayableItem::Track(FullTrack {
                         name,
                         duration,
@@ -133,12 +133,13 @@ impl LPInfo {
                         duration,
                         external_urls,
                         ..
-                    }) => TrackInfo {
+                    }) => Some(TrackInfo {
                         number: count + 1,
                         name: name.to_string(),
                         duration: *duration,
                         uri: external_urls.get("spotify").map(|s| s.to_owned()),
-                    },
+                    }),
+                    _ => None,
                 })
             })
             .collect::<Vec<_>>();
