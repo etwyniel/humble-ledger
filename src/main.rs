@@ -16,11 +16,11 @@ use serenity::{
 };
 // use youtube::Youtube;
 
-use serenity_command_handler::modules::spotify_activity::SpotifyActivity;
 use serenity_command_handler::Handler;
+use serenity_command_handler::modules::spotify_activity::SpotifyActivity;
 
 use serenity_command_handler::modules::{
-    forms, spotify, Forms, ModLp, ModPoll, Pinboard, PlaylistBuilder, SpotifyOAuth,
+    Forms, ModLp, ModPoll, Pinboard, PlaylistBuilder, SpotifyOAuth, forms, spotify,
 };
 mod lp_info;
 
@@ -100,9 +100,9 @@ impl EventHandler for HandlerWrapper {
             let mut hasher = DefaultHasher::new();
             hasher.write_u64(new_message.id.get());
             let val = hasher.finish();
-            if val % 150 == 0 {
+            if val.is_multiple_of(150) {
                 new_message.react(&ctx.http, '🖕').await.unwrap();
-            } else if val % 301 == 0 {
+            } else if val.is_multiple_of(301) {
                 new_message.react(&ctx.http, '👍').await.unwrap();
             }
         }

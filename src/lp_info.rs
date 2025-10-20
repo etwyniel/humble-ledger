@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use serenity_command_handler::{events, RegisterableModule}; // serenity-command-handler, for hooking
+use serenity_command_handler::{RegisterableModule, events}; // serenity-command-handler, for hooking
 
-use serenity_command_handler::modules::polls::ReadyPollStarted;
 use serenity_command_handler::modules::Spotify;
+use serenity_command_handler::modules::polls::ReadyPollStarted;
 
 use serenity_command_handler::{
     CommandStore, CompletionStore, Handler, HandlerBuilder, Module, ModuleMap,
@@ -83,7 +83,7 @@ impl LPInfo {
             .map_ok(|(count, track)| TrackInfo {
                 number: count + 1,
                 name: track.name.to_string(),
-                duration: track.duration.clone(),
+                duration: track.duration,
                 uri: track.external_urls.get("spotify").map(|s| s.to_owned()),
             })
             .try_collect::<Vec<TrackInfo>>()
@@ -136,7 +136,7 @@ impl LPInfo {
                     }) => TrackInfo {
                         number: count + 1,
                         name: name.to_string(),
-                        duration: duration.clone(),
+                        duration: *duration,
                         uri: external_urls.get("spotify").map(|s| s.to_owned()),
                     },
                 })
@@ -165,7 +165,7 @@ impl LPInfo {
         if let Some(pid) = match_spotify_playlist(string) {
             return Ok(Some(Self::from_spotify_playlist_id(client, pid).await?));
         }
-        return Ok(None);
+        Ok(None)
     }
 }
 
@@ -194,7 +194,7 @@ fn maybe_uri<S: AsRef<str>, T: AsRef<str>>(text: T, mb_uri: Option<S>) -> String
 
 impl LPInfo {
     /// Calculate which track is playing `offset` seconds from now
-    fn now_playing(&self, offset: chrono::Duration) -> PlayState {
+    fn now_playing(&self, offset: chrono::Duration) -> PlayState<'_> {
         let started = match self.started {
             None => {
                 return PlayState::NotStarted;
@@ -213,11 +213,11 @@ impl LPInfo {
         for track in self.tracks.iter() {
             if track.duration > remain {
                 return PlayState::Playing {
-                    track: &track,
+                    track,
                     position: remain,
                 };
             } else {
-                remain = remain - track.duration;
+                remain -= track.duration;
             }
         }
         // We passed all the tracks
@@ -364,7 +364,7 @@ fn match_spotify_album(string: &str) -> Option<&str> {
 }
 
 /// Regex to identity spotify playlist URIs and extract album id
-const SPOTIFY_PLAYLIST_RE: Lazy<Regex> = Lazy::new(|| {
+static SPOTIFY_PLAYLIST_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         "\\bhttps://open.spotify.com(?:/intl-[a-z]+)?\
            /playlist/([a-zA-Z0-9]+)(?:\\?[a-zA-Z?=&]*)?\\b",
@@ -456,7 +456,7 @@ impl Clone for ModLPInfo {
 }
 
 // Roles used for pinging listening parties
-const LP_ROLES: &'static [&'static str] = &[&"Listening Party", &"Impromptu Listening Party"];
+const LP_ROLES: &[&str] = &["Listening Party", "Impromptu Listening Party"];
 
 impl ModLPInfo {
     pub fn new() -> Self {
