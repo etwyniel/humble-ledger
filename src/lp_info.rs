@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use futures_util::stream::{StreamExt, TryStreamExt};
+use futures_util::stream::TryStreamExt;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rspotify::clients::BaseClient;
@@ -26,8 +26,6 @@ use serenity_command_handler::{
 
 #[derive(Debug)]
 pub struct TrackInfo {
-    /// Position in album/playlist
-    pub number: usize,
     pub name: String,
     pub uri: Option<String>,
     pub duration: chrono::Duration,
@@ -78,10 +76,7 @@ impl LPInfo {
             .join(", ");
         let tracks = client
             .album_track(album_id, None)
-            .enumerate()
-            .map(|(count, mb)| mb.map(|x| (count, x)))
-            .map_ok(|(count, track)| TrackInfo {
-                number: count + 1,
+            .map_ok(|track| TrackInfo {
                 name: track.name.to_string(),
                 duration: track.duration,
                 uri: track.external_urls.get("spotify").map(|s| s.to_owned()),
@@ -119,8 +114,7 @@ impl LPInfo {
             .await?;
         let tracks = items
             .iter()
-            .enumerate()
-            .filter_map(|(count, item)| {
+            .filter_map(|item| {
                 item.track.as_ref().and_then(|track| match track {
                     PlayableItem::Track(FullTrack {
                         name,
@@ -134,7 +128,6 @@ impl LPInfo {
                         external_urls,
                         ..
                     }) => Some(TrackInfo {
-                        number: count + 1,
                         name: name.to_string(),
                         duration: *duration,
                         uri: external_urls.get("spotify").map(|s| s.to_owned()),
@@ -178,6 +171,7 @@ enum PlayState<'a> {
         chrono::Duration,
     ),
     Playing {
+        number: usize,
         track: &'a TrackInfo,
         /// What is the current position in the track
         position: chrono::Duration,
@@ -211,9 +205,10 @@ impl LPInfo {
             return PlayState::NotStarted;
         }
         let mut remain = now - started + offset;
-        for track in self.tracks.iter() {
+        for (n, track) in self.tracks.iter().enumerate() {
             if track.duration > remain {
                 return PlayState::Playing {
+                    number: n + 1,
                     track,
                     position: remain,
                 };
@@ -258,7 +253,10 @@ impl LPInfo {
                 embed = embed.title("Listening Party has finished.");
             }
             PlayState::Playing {
-                track, position, ..
+                track,
+                position,
+                number,
+                ..
             } => {
                 let now = chrono::offset::Utc::now();
                 let track_uri_ctx = track
@@ -283,7 +281,7 @@ impl LPInfo {
                         "Now playing",
                         format!(
                             "Track {} - {} - [{}]\nTrack started <t:{}:R>",
-                            track.number,
+                            number,
                             maybe_uri(&track.name, track_uri_ctx.as_ref()),
                             display_duration(track.duration),
                             (now - position).timestamp(),
@@ -310,7 +308,11 @@ impl LPInfo {
             PlayState::Finished(_) => {
                 embed = embed.title("Listening Party has finished.");
             }
-            PlayState::Playing { track, position } => {
+            PlayState::Playing {
+                track,
+                position,
+                number,
+            } => {
                 let now = chrono::offset::Utc::now();
                 let track_uri_ctx = track
                     .uri
@@ -321,7 +323,7 @@ impl LPInfo {
                     format!(
                         "{} - {} - ({})\nGo to position **{}**\n Start playback:\
                          <t:{}:R>",
-                        track.number,
+                        number,
                         maybe_uri(&track.name, track_uri_ctx.as_ref()),
                         display_duration(track.duration),
                         display_duration(position),
