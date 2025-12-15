@@ -1,3 +1,4 @@
+use crate::serenity;
 use anyhow::Context as _;
 use futures_util::stream::TryStreamExt;
 use once_cell::sync::Lazy;
@@ -11,6 +12,7 @@ use serenity::model::prelude::{ChannelId, Message};
 use serenity::{async_trait, prelude::Context};
 use serenity_command::{BotCommand, CommandResponse, ResponseType};
 use serenity_command_derive::Command;
+use serenity_command_handler::serenity::all::GenericChannelId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -223,7 +225,7 @@ impl LPInfo {
     }
 
     /// Build discord embed for lp_info
-    fn build_info_embed(&self) -> CreateEmbed {
+    fn build_info_embed(&self) -> CreateEmbed<'static> {
         let (lp_name, lp_id) = match &self.playlist {
             PlaylistInfo::AlbumInfo {
                 id,
@@ -294,7 +296,7 @@ impl LPInfo {
     }
 
     /// Build discord embed for lp_join
-    fn build_join_embed(&self, offset: chrono::Duration) -> CreateEmbed {
+    fn build_join_embed(&self, offset: chrono::Duration) -> CreateEmbed<'static> {
         let lp_id = match &self.playlist {
             PlaylistInfo::AlbumInfo { id, .. } | PlaylistInfo::PlaylistInfo { id, .. } => {
                 id.clone()
@@ -445,7 +447,7 @@ impl BotCommand for JoinLP {
 }
 
 pub struct ModLPInfo {
-    last_pinged: Arc<RwLock<HashMap<ChannelId, LPInfo>>>,
+    last_pinged: Arc<RwLock<HashMap<GenericChannelId, LPInfo>>>,
     lp_roles: Arc<RwLock<HashMap<GuildId, Vec<RoleId>>>>,
 }
 
@@ -536,11 +538,11 @@ impl ModLPInfo {
     }
 
     // Set the Listening party as started
-    pub async fn start_lp(&self, channel: &ChannelId) {
+    pub async fn start_lp(&self, channel: GenericChannelId) {
         let now = chrono::offset::Utc::now();
         let mut channels = self.last_pinged.write().await;
         channels
-            .entry(*channel)
+            .entry(channel)
             .and_modify(|lp_info| lp_info.started = Some(now));
     }
 }
@@ -553,7 +555,7 @@ impl Module for ModLPInfo {
             let this = that.clone();
             let c = *channel;
             Box::pin(async move {
-                this.start_lp(&c).await;
+                this.start_lp(c).await;
             })
         });
     }

@@ -5,6 +5,9 @@ use std::{env, hash::Hasher};
 use anyhow::Context as _;
 use rspotify::scopes;
 use rusqlite::Connection;
+
+pub use serenity_command_handler::serenity;
+
 use serenity::all::{ApplicationId, CommandDataOptionValue, GuildId};
 use serenity::async_trait;
 use serenity::model::application::Command;
@@ -18,6 +21,7 @@ use serenity::{
 
 use serenity_command_handler::Handler;
 use serenity_command_handler::modules::spotify_activity::SpotifyActivity;
+use serenity_command_handler::serenity::all::{FullEvent, Token};
 
 use serenity_command_handler::modules::{
     Forms, ModLp, ModPoll, Pinboard, PlaylistBuilder, SpotifyOAuth, forms, spotify,
@@ -43,9 +47,8 @@ pub fn get_focused_option(options: &[CommandDataOption]) -> Option<&str> {
 
 struct HandlerWrapper(Handler);
 
-#[async_trait]
-impl EventHandler for HandlerWrapper {
-    async fn ready(&self, ctx: Context, data_about_bot: serenity::model::gateway::Ready) {
+impl HandlerWrapper {
+    async fn ready(&self, ctx: &Context, data_about_bot: &serenity::model::gateway::Ready) {
         _ = self.0.http.set(Arc::clone(&ctx.http));
         let commands = Command::get_global_commands(&ctx.http).await.unwrap();
         for cmd in commands {
@@ -61,7 +64,7 @@ impl EventHandler for HandlerWrapper {
             if runner.is_management() {
                 self.0
                     .management_guild
-                    .create_command(&ctx, runner.register())
+                    .create_command(&ctx.http, runner.register())
                     .await
                     .unwrap();
                 continue;
@@ -95,7 +98,7 @@ impl EventHandler for HandlerWrapper {
         forms::check_forms(&self.0, &ctx).await.unwrap();
     }
 
-    async fn message(&self, ctx: Context, new_message: Message) {
+    async fn message(&self, ctx: &Context, new_message: &Message) {
         if new_message.author.id.get() == 513626599330152458 {
             let mut hasher = DefaultHasher::new();
             hasher.write_u64(new_message.id.get());
@@ -118,17 +121,17 @@ impl EventHandler for HandlerWrapper {
             .await;
     }
 
-    async fn presence_update(&self, _: Context, presence: Presence) {
+    async fn presence_update(&self, _: &Context, presence: &Presence) {
         if let Ok(spt_act) = self.0.module::<SpotifyActivity>() {
             spt_act.presence_update(&presence).await
         }
     }
 
-    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+    async fn interaction_create(&self, ctx: &Context, interaction: &Interaction) {
         self.0.process_interaction(ctx, interaction).await;
     }
 
-    async fn reaction_add(&self, ctx: Context, add_reaction: serenity::model::prelude::Reaction) {
+    async fn reaction_add(&self, ctx: &Context, add_reaction: &serenity::model::prelude::Reaction) {
         if add_reaction.user_id == self.0.self_id.get().copied() {
             return;
         }
@@ -140,15 +143,15 @@ impl EventHandler for HandlerWrapper {
 
     async fn reaction_remove(
         &self,
-        ctx: Context,
-        remove_reaction: serenity::model::prelude::Reaction,
+        ctx: &Context,
+        remove_reaction: &serenity::model::prelude::Reaction,
     ) {
         ModPoll::handle_remove_react(&self.0, &ctx, &remove_reaction)
             .await
             .unwrap()
     }
 
-    async fn channel_pins_update(&self, ctx: Context, pin: ChannelPinsUpdateEvent) {
+    async fn channel_pins_update(&self, ctx: &Context, pin: &ChannelPinsUpdateEvent) {
         let guild_id = match pin.guild_id {
             Some(gid) => gid,
             None => return,
@@ -161,6 +164,28 @@ impl EventHandler for HandlerWrapper {
                 .map(|name| format!("[{name}] "))
                 .unwrap_or_default();
             eprintln!("{guild_name}Error moving message to pinboard: {e:?}");
+        }
+    }
+}
+
+#[async_trait]
+impl EventHandler for HandlerWrapper {
+    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
+        match event {
+            FullEvent::Ready { data_about_bot, .. } => self.ready(ctx, data_about_bot).await,
+            FullEvent::Message { new_message, .. } => self.message(ctx, new_message).await,
+            FullEvent::PresenceUpdate { new_data, .. } => self.presence_update(ctx, new_data).await,
+            FullEvent::InteractionCreate { interaction, .. } => {
+                self.interaction_create(ctx, interaction).await
+            }
+            FullEvent::ReactionAdd { add_reaction, .. } => {
+                self.reaction_add(ctx, add_reaction).await
+            }
+            FullEvent::ReactionRemove {
+                removed_reaction, ..
+            } => self.reaction_add(ctx, removed_reaction).await,
+            FullEvent::ChannelPinsUpdate { pin, .. } => self.channel_pins_update(ctx, pin).await,
+            _ => return,
         }
     }
 }
@@ -218,8 +243,6 @@ async fn build_handler() -> anyhow::Result<Handler> {
 async fn main() {
     let handler = build_handler().await.unwrap();
 
-    let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
-
     let application_id: u64 = env::var("APPLICATION_ID")
         .expect("Expected an application id in the environment")
         .parse()
@@ -227,15 +250,14 @@ async fn main() {
 
     // Build our client.
     let mut client = serenity::Client::builder(
-        token,
+        Token::from_env("DISCORD_TOKEN").unwrap(),
         GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::GUILD_MESSAGE_REACTIONS
             | GatewayIntents::GUILD_PRESENCES
             | GatewayIntents::MESSAGE_CONTENT
             | GatewayIntents::GUILDS,
     )
-    .event_handler(HandlerWrapper(handler))
-    .application_id(ApplicationId::new(application_id))
+    .event_handler(Arc::new(HandlerWrapper(handler)))
     .await
     .expect("Error creating client");
 
