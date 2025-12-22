@@ -8,7 +8,7 @@ use rusqlite::Connection;
 
 pub use serenity_command_handler::serenity;
 
-use serenity::all::{ApplicationId, CommandDataOptionValue, GuildId};
+use serenity::all::{CommandDataOptionValue, GuildId};
 use serenity::async_trait;
 use serenity::model::application::Command;
 use serenity::model::prelude::Interaction;
@@ -59,6 +59,9 @@ impl HandlerWrapper {
             }
         }
         self.0.self_id.set(data_about_bot.user.id).unwrap();
+        for module in &self.0.module_list {
+            module.start(ctx, data_about_bot);
+        }
         eprintln!("{} is running!", &data_about_bot.user.name);
         for runner in self.0.commands.read().await.0.values() {
             if runner.is_management() {
@@ -95,7 +98,7 @@ impl HandlerWrapper {
                     .unwrap();
             }
         }
-        forms::check_forms(&self.0, &ctx).await.unwrap();
+        forms::check_forms(&self.0, ctx).await.unwrap();
     }
 
     async fn message(&self, ctx: &Context, new_message: &Message) {
@@ -109,21 +112,16 @@ impl HandlerWrapper {
                 new_message.react(&ctx.http, '👍').await.unwrap();
             }
         }
-
-        let spotify = self
-            .0
-            .module::<SpotifyOAuth>()
-            .expect("Could not find spotify module");
         self.0
             .module::<lp_info::ModLPInfo>()
             .expect("LP module not found")
-            .handle_message(&spotify.client, &ctx, &new_message)
+            .handle_message(ctx, new_message)
             .await;
     }
 
     async fn presence_update(&self, _: &Context, presence: &Presence) {
         if let Ok(spt_act) = self.0.module::<SpotifyActivity>() {
-            spt_act.presence_update(&presence).await
+            spt_act.presence_update(presence).await
         }
     }
 
@@ -135,10 +133,10 @@ impl HandlerWrapper {
         if add_reaction.user_id == self.0.self_id.get().copied() {
             return;
         }
-        ModPoll::handle_ready_poll(&self.0, &ctx, &add_reaction)
+        ModPoll::handle_ready_poll(&self.0, ctx, add_reaction)
             .await
             .unwrap();
-        _ = spotify::handle_reaction(&self.0, &ctx.http, &add_reaction).await;
+        _ = spotify::handle_reaction(&self.0, &ctx.http, add_reaction).await;
     }
 
     async fn reaction_remove(
@@ -146,7 +144,7 @@ impl HandlerWrapper {
         ctx: &Context,
         remove_reaction: &serenity::model::prelude::Reaction,
     ) {
-        ModPoll::handle_remove_react(&self.0, &ctx, &remove_reaction)
+        ModPoll::handle_remove_react(&self.0, ctx, remove_reaction)
             .await
             .unwrap()
     }
@@ -156,8 +154,7 @@ impl HandlerWrapper {
             Some(gid) => gid,
             None => return,
         };
-        if let Err(e) =
-            Pinboard::move_pin_to_pinboard(&self.0, &ctx, pin.channel_id, guild_id).await
+        if let Err(e) = Pinboard::move_pin_to_pinboard(&self.0, ctx, pin.channel_id, guild_id).await
         {
             let guild_name = guild_id
                 .name(&ctx.cache)
@@ -183,7 +180,7 @@ impl EventHandler for HandlerWrapper {
             }
             FullEvent::ReactionRemove {
                 removed_reaction, ..
-            } => self.reaction_add(ctx, removed_reaction).await,
+            } => self.reaction_remove(ctx, removed_reaction).await,
             FullEvent::ChannelPinsUpdate { pin, .. } => self.channel_pins_update(ctx, pin).await,
             _ => return,
         }
@@ -242,11 +239,6 @@ async fn build_handler() -> anyhow::Result<Handler> {
 #[tokio::main]
 async fn main() {
     let handler = build_handler().await.unwrap();
-
-    let application_id: u64 = env::var("APPLICATION_ID")
-        .expect("Expected an application id in the environment")
-        .parse()
-        .expect("application id is not a valid id");
 
     // Build our client.
     let mut client = serenity::Client::builder(

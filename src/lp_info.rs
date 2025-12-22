@@ -1,5 +1,6 @@
 use crate::serenity;
 use anyhow::Context as _;
+use chrono::{DateTime, Utc};
 use futures_util::stream::TryStreamExt;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -8,18 +9,18 @@ use rspotify::model::{FullEpisode, FullTrack, PlayableItem, PlaylistItem};
 use serenity::all::{GuildId, RoleId};
 use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
-use serenity::model::prelude::{ChannelId, Message};
+use serenity::model::prelude::Message;
 use serenity::{async_trait, prelude::Context};
 use serenity_command::{BotCommand, CommandResponse, ResponseType};
 use serenity_command_derive::Command;
-use serenity_command_handler::serenity::all::GenericChannelId;
+use serenity_command_handler::modules::Spotify;
+use serenity_command_handler::serenity::all::{GenericChannelId, Http, MessageId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 
 use serenity_command_handler::{RegisterableModule, events}; // serenity-command-handler, for hooking
 
-use serenity_command_handler::modules::Spotify;
 use serenity_command_handler::modules::polls::ReadyPollStarted;
 
 use serenity_command_handler::{
@@ -53,8 +54,14 @@ enum PlaylistInfo {
 pub struct LPInfo {
     playlist: PlaylistInfo,
     tracks: Vec<TrackInfo>,
-    /// If and when the listening party has started
-    started: Option<chrono::DateTime<chrono::Utc>>,
+    /// when the listening party has started
+    started: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug)]
+pub enum PingedLp {
+    Pinged(MessageId),
+    Started(LPInfo),
 }
 
 impl LPInfo {
@@ -62,6 +69,7 @@ impl LPInfo {
     async fn from_spotify_album_id<C: BaseClient>(
         client: &C,
         album_id_str: &str,
+        started: DateTime<Utc>,
     ) -> anyhow::Result<Self> {
         let album_id =
             rspotify::model::AlbumId::from_id(album_id_str).context("trying to parse album ID")?;
@@ -94,13 +102,14 @@ impl LPInfo {
                 uri: album.external_urls.get("spotify").map(|s| s.to_owned()),
             },
             tracks,
-            started: None,
+            started,
         })
     }
     /// Look up a playlist from a spotify ID
     async fn from_spotify_playlist_id<C: BaseClient>(
         client: &C,
         album_id_str: &str,
+        started: DateTime<Utc>,
     ) -> anyhow::Result<Self> {
         let playlist_id = rspotify::model::PlaylistId::from_id(album_id_str)
             .context("trying to parse playlist ID")?;
@@ -146,7 +155,7 @@ impl LPInfo {
                 uri: playlist.external_urls.get("spotify").map(|s| s.to_owned()),
             },
             tracks,
-            started: None,
+            started,
         })
     }
 
@@ -154,12 +163,17 @@ impl LPInfo {
     async fn from_match_string<C: BaseClient>(
         client: &C,
         string: &str,
+        started: DateTime<Utc>,
     ) -> anyhow::Result<Option<Self>> {
         if let Some(aid) = match_spotify_album(string) {
-            return Ok(Some(Self::from_spotify_album_id(client, aid).await?));
+            return Ok(Some(
+                Self::from_spotify_album_id(client, aid, started).await?,
+            ));
         }
         if let Some(pid) = match_spotify_playlist(string) {
-            return Ok(Some(Self::from_spotify_playlist_id(client, pid).await?));
+            return Ok(Some(
+                Self::from_spotify_playlist_id(client, pid, started).await?,
+            ));
         }
         Ok(None)
     }
@@ -192,12 +206,7 @@ fn maybe_uri<S: AsRef<str>, T: AsRef<str>>(text: T, mb_uri: Option<S>) -> String
 impl LPInfo {
     /// Calculate which track is playing `offset` seconds from now
     fn now_playing(&self, offset: chrono::Duration) -> PlayState<'_> {
-        let started = match self.started {
-            None => {
-                return PlayState::NotStarted;
-            }
-            Some(started) => started,
-        };
+        let started = self.started;
         let now = chrono::offset::Utc::now();
         if started > now {
             eprintln!(
@@ -265,7 +274,7 @@ impl LPInfo {
                     .uri
                     .as_ref()
                     .map(|uri| format!("{}?context={}", uri, &lp_id));
-                let playlist_end = (self.started.unwrap() + playlist_duration).timestamp();
+                let playlist_end = (self.started + playlist_duration).timestamp();
                 embed = embed
                     .title("Listening Party in full swing! Join in!")
                     .field(
@@ -273,8 +282,8 @@ impl LPInfo {
                         format!(
                             "**Started**: <t:{}:t> (<t:{}:R>)\n\
                                     **Ends:** <t:{}:t> ",
-                            self.started.unwrap().timestamp(),
-                            self.started.unwrap().timestamp(),
+                            self.started.timestamp(),
+                            self.started.timestamp(),
                             playlist_end
                         ),
                         true,
@@ -406,8 +415,8 @@ impl BotCommand for CurrentLP {
             let lp = lps.get(&interaction.channel_id);
             match lp {
                 None => "There is no listening party at the moment.".into(),
-
-                Some(lpinfo) => lpinfo.build_info_embed().into(),
+                Some(PingedLp::Pinged(_)) => "Listening Party has not started yet.".into(),
+                Some(PingedLp::Started(lpinfo)) => lpinfo.build_info_embed().into(),
             }
         };
 
@@ -441,14 +450,21 @@ impl BotCommand for JoinLP {
         let lp = lps.get(&interaction.channel_id);
         match lp {
             None => CommandResponse::private("There is no listening party at the moment."),
-            Some(lpinfo) => CommandResponse::private(lpinfo.build_join_embed(offset)),
+            Some(PingedLp::Pinged(_)) => {
+                CommandResponse::private("Listening Party has not started yet.")
+            }
+            Some(PingedLp::Started(lpinfo)) => {
+                CommandResponse::private(lpinfo.build_join_embed(offset))
+            }
         }
     }
 }
 
 pub struct ModLPInfo {
-    last_pinged: Arc<RwLock<HashMap<GenericChannelId, LPInfo>>>,
+    last_pinged: Arc<RwLock<HashMap<GenericChannelId, PingedLp>>>,
     lp_roles: Arc<RwLock<HashMap<GuildId, Vec<RoleId>>>>,
+    spotify: Arc<Spotify>,
+    http: OnceCell<Arc<Http>>,
 }
 
 impl Clone for ModLPInfo {
@@ -456,6 +472,8 @@ impl Clone for ModLPInfo {
         ModLPInfo {
             last_pinged: Arc::clone(&self.last_pinged),
             lp_roles: Arc::clone(&self.lp_roles),
+            spotify: Arc::clone(&self.spotify),
+            http: self.http.clone(),
         }
     }
 }
@@ -464,10 +482,12 @@ impl Clone for ModLPInfo {
 const LP_ROLES: &[&str] = &["Listening Party", "Impromptu Listening Party"];
 
 impl ModLPInfo {
-    pub fn new() -> Self {
+    pub fn new(spotify: Arc<Spotify>) -> Self {
         ModLPInfo {
             last_pinged: Default::default(),
             lp_roles: Default::default(),
+            spotify,
+            http: Default::default(),
         }
     }
 
@@ -475,8 +495,7 @@ impl ModLPInfo {
     //
     // We consider a message a LP ping if if mentions one of the LP roles
     // and it contains a spotify playlist or album link
-    pub async fn handle_message<C: BaseClient>(&self, client: &C, ctx: &Context, msg: &Message) {
-        let msg_txt: &str = &msg.content;
+    pub async fn handle_message(&self, ctx: &Context, msg: &Message) {
         if msg.mention_roles.is_empty() {
             return;
         }
@@ -496,60 +515,71 @@ impl ModLPInfo {
         let Some(roles) = lp_roles_map.get(&guild_id) else {
             return;
         };
-        if msg
+        if !msg
             .mention_roles
             .iter()
             // Resolve ID to role
             .any(|rid| roles.contains(rid))
         {
-            let pl = match LPInfo::from_match_string(client, msg_txt).await {
-                Err(e) => {
-                    eprintln!("Error resolving spotify link: {}", e);
-                    return;
-                }
-                Ok(Some(pl)) => {
-                    // Collect info to log
-                    let guild_name = match msg.guild_id {
-                        Some(guild) => guild
-                            .to_partial_guild(&ctx.http)
-                            .await
-                            .map(|guild| format!("[{}] ", &guild.name))
-                            .unwrap_or_default(),
-                        None => String::new(),
-                    };
-                    let username = &msg.author.name;
-                    let pinged = match &pl.playlist {
-                        PlaylistInfo::AlbumInfo {
-                            id, artist, name, ..
-                        } => format!("{id} ({artist} - {name})"),
-                        PlaylistInfo::PlaylistInfo { id, name, .. } => {
-                            format!("{id} ({name})")
-                        }
-                    };
-                    eprintln!("{guild_name}{username}: Pinged Listening Party: {pinged}");
-                    pl
-                }
-                Ok(None) => return,
-            };
-            // Store album/playlist in channel info
-            let mut channels = self.last_pinged.write().await;
-            (*channels).insert(msg.channel_id, pl);
-        };
+            return;
+        }
+        // Store LP message ID in channel info
+        let mut channels = self.last_pinged.write().await;
+        let pl = PingedLp::Pinged(msg.id);
+        (*channels).insert(msg.channel_id, pl);
     }
 
     // Set the Listening party as started
     pub async fn start_lp(&self, channel: GenericChannelId) {
-        let now = chrono::offset::Utc::now();
-        let mut channels = self.last_pinged.write().await;
-        channels
-            .entry(channel)
-            .and_modify(|lp_info| lp_info.started = Some(now));
+        let last_pinged = Arc::clone(&self.last_pinged);
+        let spotify = Arc::clone(&self.spotify);
+        let http = Arc::clone(self.http.get().unwrap());
+        tokio::spawn(async move {
+            let now = chrono::offset::Utc::now();
+            let mut channels = last_pinged.write().await;
+            let Some(entry) = channels.get_mut(&channel) else {
+                return;
+            };
+            let PingedLp::Pinged(msg_id) = &*entry else {
+                return;
+            };
+            let message = http.get_message(channel, *msg_id).await.unwrap();
+            let pl = match LPInfo::from_match_string(&spotify.client, &message.content, now).await {
+                Err(e) => {
+                    eprintln!("Error resolving spotify link: {}", e);
+                    return;
+                }
+                Ok(Some(pl)) => pl,
+                Ok(None) => return,
+            };
+            // Collect info to log
+            let guild_name = match message.guild_id {
+                Some(guild) => guild
+                    .to_partial_guild(http)
+                    .await
+                    .map(|guild| format!("[{}] ", &guild.name))
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            let username = &message.author.name;
+            let pinged = match &pl.playlist {
+                PlaylistInfo::AlbumInfo {
+                    id, artist, name, ..
+                } => format!("{id} ({artist} - {name})"),
+                PlaylistInfo::PlaylistInfo { id, name, .. } => {
+                    format!("{id} ({name})")
+                }
+            };
+            eprintln!("{guild_name}{username}: Pinged Listening Party: {pinged}");
+            // Store album/playlist in channel info
+            *entry = PingedLp::Started(pl);
+        });
     }
 }
 
 #[async_trait]
 impl Module for ModLPInfo {
-    fn register_event_handlers(&self, handlers: &mut events::EventHandlers) {
+    fn register_event_handlers(self: Arc<Self>, handlers: &mut events::EventHandlers) {
         let that = self.clone();
         handlers.add_handler(move |ReadyPollStarted { channel }| {
             let this = that.clone();
@@ -564,6 +594,11 @@ impl Module for ModLPInfo {
         store.register::<CurrentLP>();
         store.register::<JoinLP>();
     }
+
+    fn start(&self, ctx: &Context, _: &serenity::model::gateway::Ready) {
+        let http = Arc::clone(&ctx.http);
+        self.http.set(http).unwrap();
+    }
 }
 
 impl RegisterableModule for ModLPInfo {
@@ -571,8 +606,9 @@ impl RegisterableModule for ModLPInfo {
         builder.module::<Spotify>().await
     }
 
-    async fn init(_m: &ModuleMap) -> anyhow::Result<Self> {
-        Ok(Self::new())
+    async fn init(m: &ModuleMap) -> anyhow::Result<Self> {
+        let spotify = m.module_arc().unwrap();
+        Ok(Self::new(spotify))
     }
 }
 
