@@ -474,7 +474,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa 1.0.15",
- "phf 0.11.3",
+ "phf 0.8.0",
  "smallvec",
 ]
 
@@ -1300,7 +1300,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "system-configuration 0.6.1",
  "tokio",
  "tower-service",
@@ -2124,7 +2124,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3dfb61232e34fcb633f43d12c58f83c1df82962dcdfa565a4e866ffc17dafe12"
 dependencies = [
- "phf_macros 0.8.0",
+ "phf_macros",
  "phf_shared 0.8.0",
  "proc-macro-hack",
 ]
@@ -2136,16 +2136,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabbf1ead8a5bcbc20f5f8b939ee3f5b0f6f281b6ad3468b84656b658b455259"
 dependencies = [
  "phf_shared 0.10.0",
-]
-
-[[package]]
-name = "phf"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
-dependencies = [
- "phf_macros 0.11.3",
- "phf_shared 0.11.3",
 ]
 
 [[package]]
@@ -2210,19 +2200,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
-dependencies = [
- "phf_generator 0.11.3",
- "phf_shared 0.11.3",
- "proc-macro2",
- "quote",
- "syn 2.0.107",
 ]
 
 [[package]]
@@ -2405,7 +2382,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -2442,7 +2419,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3198,7 +3175,7 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.12.4"
-source = "git+https://github.com/serenity-rs/serenity?branch=next#7443ac1a64f064ea5c1c1ded0f50ee7f0fd116ee"
+source = "git+https://github.com/serenity-rs/serenity?branch=next#82756d7fa5782c9efcc86392a783d282e48a6869"
 dependencies = [
  "aformat",
  "arrayvec",
@@ -3235,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "serenity-command"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#3f75ee393993d3b69982b4f3c9f1bff55f3ed8dd"
+source = "git+https://github.com/etwyniel/discord_framework#891567750ebf165a31929e3eb25ec38a60688f51"
 dependencies = [
  "anyhow",
  "serenity",
@@ -3244,7 +3221,7 @@ dependencies = [
 [[package]]
 name = "serenity-command-derive"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#3f75ee393993d3b69982b4f3c9f1bff55f3ed8dd"
+source = "git+https://github.com/etwyniel/discord_framework#891567750ebf165a31929e3eb25ec38a60688f51"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3255,7 +3232,7 @@ dependencies = [
 [[package]]
 name = "serenity-command-handler"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#3f75ee393993d3b69982b4f3c9f1bff55f3ed8dd"
+source = "git+https://github.com/etwyniel/discord_framework#891567750ebf165a31929e3eb25ec38a60688f51"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4297,7 +4274,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
