@@ -21,7 +21,7 @@ use serenity::{
 
 use serenity_command_handler::Handler;
 use serenity_command_handler::modules::spotify_activity::SpotifyActivity;
-use serenity_command_handler::serenity::all::{FullEvent, Token};
+use serenity_command_handler::serenity::all::{CreateCommand, FullEvent, Token};
 
 use serenity_command_handler::modules::{
     Forms, ModLp, ModPoll, Pinboard, PlaylistBuilder, SpotifyOAuth, forms, spotify,
@@ -45,10 +45,14 @@ pub fn get_focused_option(options: &[CommandDataOption]) -> Option<&str> {
     })
 }
 
-struct HandlerWrapper(Handler);
+struct HandlerWrapper(Arc<Handler>);
 
 impl HandlerWrapper {
     async fn ready(&self, ctx: &Context, data_about_bot: &serenity::model::gateway::Ready) {
+        if self.0.self_id.initialized() {
+            return;
+        }
+        self.0.self_id.set(data_about_bot.user.id).unwrap();
         _ = self.0.http.set(Arc::clone(&ctx.http));
         let commands = Command::get_global_commands(&ctx.http).await.unwrap();
         for cmd in commands {
@@ -58,45 +62,39 @@ impl HandlerWrapper {
                     .unwrap();
             }
         }
-        self.0.self_id.set(data_about_bot.user.id).unwrap();
         for module in &self.0.module_list {
             module.start(ctx, data_about_bot);
         }
         eprintln!("{} is running!", &data_about_bot.user.name);
         for runner in self.0.commands.read().await.0.values() {
-            if runner.is_management() {
+            let mut cmd = CreateCommand::new(runner.name).description(runner.description);
+            cmd = (runner.register_options)(cmd);
+            if runner.is_management {
                 self.0
                     .management_guild
-                    .create_command(&ctx.http, runner.register())
+                    .create_command(&ctx.http, cmd)
                     .await
                     .unwrap();
                 continue;
             }
-            if runner.is_guild_command() {
+            if runner.is_guild {
                 let guilds = self
                     .0
                     .db
                     .lock()
                     .await
-                    .get_command_enabled_guilds(runner.name().0);
+                    .get_command_enabled_guilds(runner.name);
                 for guild_id in guilds {
                     guild_id
-                        .create_command(&ctx.http, runner.register())
+                        .create_command(&ctx.http, cmd.clone())
                         .await
                         .unwrap();
                 }
                 continue;
             }
-            if let Some(guild) = runner.guild() {
-                guild
-                    .create_command(&ctx.http, runner.register())
-                    .await
-                    .unwrap();
-            } else {
-                Command::create_global_command(&ctx.http, runner.register())
-                    .await
-                    .unwrap();
-            }
+            Command::create_global_command(&ctx.http, cmd)
+                .await
+                .unwrap();
         }
         forms::check_forms(&self.0, ctx).await.unwrap();
     }
@@ -187,7 +185,7 @@ impl EventHandler for HandlerWrapper {
     }
 }
 
-async fn build_handler() -> anyhow::Result<Handler> {
+async fn build_handler() -> anyhow::Result<Arc<Handler>> {
     let conn = Connection::open("humble_ledger.sqlite")?;
     let polls = ModPoll::new("✅", "❎", "▶️", None, "<a:crabrave:996854529742094417>");
     let spotify_oauth = SpotifyOAuth::new_auth_code(scopes!(

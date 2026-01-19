@@ -11,21 +11,18 @@ use serenity::builder::CreateEmbed;
 use serenity::model::prelude::CommandInteraction;
 use serenity::model::prelude::Message;
 use serenity::{async_trait, prelude::Context};
-use serenity_command::{BotCommand, CommandResponse, ResponseType};
-use serenity_command_derive::Command;
+use serenity_command::{CommandResponse, ResponseType, args, command};
 use serenity_command_handler::modules::Spotify;
 use serenity_command_handler::serenity::all::{GenericChannelId, Http, MessageId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, RwLock};
 
-use serenity_command_handler::{RegisterableModule, events}; // serenity-command-handler, for hooking
+use serenity_command_handler::{CommandConst, RegisterableModule, Storer, events}; // serenity-command-handler, for hooking
 
 use serenity_command_handler::modules::polls::ReadyPollStarted;
 
-use serenity_command_handler::{
-    CommandStore, CompletionStore, Handler, HandlerBuilder, Module, ModuleMap,
-};
+use serenity_command_handler::{Handler, HandlerBuilder, Module, ModuleMap};
 
 #[derive(Debug)]
 pub struct TrackInfo {
@@ -393,69 +390,67 @@ fn match_spotify_playlist(string: &str) -> Option<&str> {
         .map(|caps| caps.get(1).unwrap().as_str())
 }
 
-#[derive(Command, Debug)]
-#[cmd(name = "lp_info", desc = "Check if listening party is going")]
-pub struct CurrentLP {
-    #[cmd(desc = "Should the answer be visible to everyone?")]
+args!(CURRENT_LP_ARGS =
+     "Should the answer be visible to everyone?"
     visible: Option<bool>,
-}
+);
 
-#[async_trait]
-impl BotCommand for CurrentLP {
-    type Data = Handler;
-    async fn run(
-        self,
-        data: &Handler,
-        _ctx: &Context,
-        interaction: &CommandInteraction,
-    ) -> anyhow::Result<CommandResponse> {
-        let msg: ResponseType = {
-            // Find last LP
-            let lps = data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
-            let lp = lps.get(&interaction.channel_id);
-            match lp {
-                None => "There is no listening party at the moment.".into(),
-                Some(PingedLp::Pinged(_)) => "Listening Party has not started yet.".into(),
-                Some(PingedLp::Started(lpinfo)) => lpinfo.build_info_embed().into(),
-            }
-        };
+const CURRENT_LP: CommandConst = CommandConst {
+    description: "Should the answer be visible to everyone?",
+    ..command!(/lp_info CURRENT_LP_ARGS: current_lp)
+};
 
-        if self.visible.unwrap_or(false) {
-            CommandResponse::public(msg)
-        } else {
-            CommandResponse::private(msg)
-        }
-    }
-}
-
-#[derive(Command, Debug)]
-#[cmd(name = "lp_join", desc = "Join a listening party (privately)")]
-pub struct JoinLP {
-    #[cmd(desc = "Seconds to start playing")]
-    offset: Option<u64>,
-}
-
-#[async_trait]
-impl BotCommand for JoinLP {
-    type Data = Handler;
-    async fn run(
-        self,
-        data: &Handler,
-        _ctx: &Context,
-        interaction: &CommandInteraction,
-    ) -> anyhow::Result<CommandResponse> {
-        let offset = chrono::Duration::seconds(self.offset.unwrap_or(15) as i64);
+async fn current_lp(
+    (visible,): CURRENT_LP_ARGS,
+    data: &Handler,
+    _ctx: &Context,
+    interaction: &CommandInteraction,
+) -> anyhow::Result<CommandResponse> {
+    let msg: ResponseType = {
         // Find last LP
         let lps = data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
         let lp = lps.get(&interaction.channel_id);
         match lp {
-            None => CommandResponse::private("There is no listening party at the moment."),
-            Some(PingedLp::Pinged(_)) => {
-                CommandResponse::private("Listening Party has not started yet.")
-            }
-            Some(PingedLp::Started(lpinfo)) => {
-                CommandResponse::private(lpinfo.build_join_embed(offset))
-            }
+            None => "There is no listening party at the moment.".into(),
+            Some(PingedLp::Pinged(_)) => "Listening Party has not started yet.".into(),
+            Some(PingedLp::Started(lpinfo)) => lpinfo.build_info_embed().into(),
+        }
+    };
+
+    if visible.unwrap_or(false) {
+        CommandResponse::public(msg)
+    } else {
+        CommandResponse::private(msg)
+    }
+}
+
+args!(LP_JOIN_ARGS =
+     "Seconds to start playing"
+    offset: Option<i64>,
+);
+
+const LP_JOIN: CommandConst = CommandConst {
+    description: "Join a listening party (privately)",
+    ..command!(/lp_join LP_JOIN_ARGS: lp_join)
+};
+
+async fn lp_join(
+    (offset,): LP_JOIN_ARGS,
+    data: &Handler,
+    _ctx: &Context,
+    interaction: &CommandInteraction,
+) -> anyhow::Result<CommandResponse> {
+    let offset = chrono::Duration::seconds(offset.unwrap_or(15));
+    // Find last LP
+    let lps = data.module::<ModLPInfo>().unwrap().last_pinged.read().await;
+    let lp = lps.get(&interaction.channel_id);
+    match lp {
+        None => CommandResponse::private("There is no listening party at the moment."),
+        Some(PingedLp::Pinged(_)) => {
+            CommandResponse::private("Listening Party has not started yet.")
+        }
+        Some(PingedLp::Started(lpinfo)) => {
+            CommandResponse::private(lpinfo.build_join_embed(offset))
         }
     }
 }
@@ -590,9 +585,9 @@ impl Module for ModLPInfo {
         });
     }
 
-    fn register_commands(&self, store: &mut CommandStore, _completions: &mut CompletionStore) {
-        store.register::<CurrentLP>();
-        store.register::<JoinLP>();
+    fn register_commands(&self, store: &mut dyn Storer) {
+        store.register(CURRENT_LP);
+        store.register(LP_JOIN);
     }
 
     fn start(&self, ctx: &Context, _: &serenity::model::gateway::Ready) {
