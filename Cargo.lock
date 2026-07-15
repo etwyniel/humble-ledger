@@ -1304,7 +1304,7 @@ dependencies = [
  "itertools 0.12.1",
  "once_cell",
  "oorandom",
- "rand 0.8.7",
+ "rand 0.10.2",
  "regex",
  "reqwest 0.11.27",
  "rspotify",
@@ -3596,7 +3596,6 @@ dependencies = [
 [[package]]
 name = "serenity-command"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#2a84010773fc0d6a4847fc279044ded7204be588"
 dependencies = [
  "anyhow",
  "serenity",
@@ -3605,7 +3604,6 @@ dependencies = [
 [[package]]
 name = "serenity-command-handler"
 version = "0.1.0"
-source = "git+https://github.com/etwyniel/discord_framework#2a84010773fc0d6a4847fc279044ded7204be588"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
