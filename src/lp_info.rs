@@ -123,7 +123,7 @@ impl LPInfo {
         let tracks = items
             .iter()
             .filter_map(|item| {
-                item.track.as_ref().and_then(|track| match track {
+                item.item.as_ref().and_then(|track| match track {
                     PlayableItem::Track(FullTrack {
                         name,
                         duration,
@@ -574,7 +574,7 @@ impl ModLPInfo {
 
 #[async_trait]
 impl Module for ModLPInfo {
-    fn register_event_handlers(self: Arc<Self>, handlers: &mut events::EventHandlers) {
+    fn register_event_handlers(self: Arc<Self>, handlers: &mut events::EventDispatcher) {
         let that = self.clone();
         handlers.add_handler(move |ReadyPollStarted { channel }| {
             let this = that.clone();

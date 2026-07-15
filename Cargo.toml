@@ -13,7 +13,7 @@ serenity-command = { git = "https://github.com/etwyniel/discord_framework" }
 chrono = "0.4.22"
 futures = "0.3.29"
 futures-util = "0.3.29"
-rspotify = "0.15"
+rspotify = "0.16"
 reqwest = "0.11.12"
 scraper = "0.13.0"
 rusqlite = "0.40"
